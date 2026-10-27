@@ -474,6 +474,9 @@
         "background_compaction": {
           "type": "boolean"
         },
+        "media_blob": {
+          "type": "boolean"
+        },
         "subagent_depth": {
           "type": "integer",
           "minimum": 0
@@ -2089,6 +2092,14 @@
         "alibaba"
       ]
     },
+    "Model.MediaInput": {
+      "type": "string",
+      "enum": [
+        "assets",
+        "state",
+        "root"
+      ]
+    },
     "Provider.Compatibility": {
       "type": "object",
       "properties": {
@@ -2115,6 +2126,9 @@
         },
         "cacheFormat": {
           "$ref": "#/$defs/Model.CacheFormat"
+        },
+        "mediaInput": {
+          "$ref": "#/$defs/Model.MediaInput"
         }
       },
       "additionalProperties": false
@@ -2152,6 +2166,19 @@
           "additionalProperties": false
         }
       ]
+    },
+    "Provider.CacheTTL": {
+      "type": "string",
+      "pattern": "^[+-]?\\d*\\.?\\d+(?:[Ee][+-]?\\d+)?(?:ms|s|m|h|d)$"
+    },
+    "Provider.Cache": {
+      "type": "object",
+      "properties": {
+        "ttl": {
+          "$ref": "#/$defs/Provider.CacheTTL"
+        }
+      },
+      "additionalProperties": false
     },
     "Provider.Transport": {
       "type": "string",
@@ -2213,6 +2240,9 @@
         "compaction": {
           "$ref": "#/$defs/Provider.Compaction"
         },
+        "cache": {
+          "$ref": "#/$defs/Provider.Cache"
+        },
         "transport": {
           "$ref": "#/$defs/Provider.Transport"
         },
@@ -2231,6 +2261,21 @@
               }
             ]
           }
+        }
+      ]
+    },
+    "Model.Type": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "chat",
+            "decision",
+            "image"
+          ]
+        },
+        {
+          "type": "string"
         }
       ]
     },
@@ -2266,6 +2311,9 @@
         },
         "supportsEffortUpdates": {
           "type": "boolean"
+        },
+        "mediaInput": {
+          "$ref": "#/$defs/Model.MediaInput"
         }
       },
       "additionalProperties": false
@@ -2275,6 +2323,9 @@
       "properties": {
         "compaction": {
           "$ref": "#/$defs/Provider.Compaction"
+        },
+        "cache": {
+          "$ref": "#/$defs/Provider.Cache"
         },
         "encoding": {
           "$ref": "#/$defs/Provider.Encoding"
@@ -2376,6 +2427,30 @@
       },
       "additionalProperties": false
     },
+    "Config.Model.VariantSettings": {
+      "type": "object",
+      "properties": {
+        "compaction": {
+          "$ref": "#/$defs/Provider.Compaction"
+        },
+        "encoding": {
+          "$ref": "#/$defs/Provider.Encoding"
+        }
+      },
+      "allOf": [
+        {
+          "type": "object",
+          "additionalProperties": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      ]
+    },
     "Money.USDPerMillionTokens": {
       "type": "number"
     },
@@ -2432,6 +2507,9 @@
         "modelID": {
           "type": "string"
         },
+        "type": {
+          "$ref": "#/$defs/Model.Type"
+        },
         "family": {
           "type": "string"
         },
@@ -2473,7 +2551,7 @@
                 "type": "string"
               },
               "settings": {
-                "$ref": "#/$defs/Config.Model.Settings"
+                "$ref": "#/$defs/Config.Model.VariantSettings"
               },
               "headers": {
                 "type": "object",
