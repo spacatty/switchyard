@@ -14,13 +14,13 @@
     "config",
     "cli"
   ],
-  "homepage": "https://github.com/spacatty/opencode-json-manager#readme",
+  "homepage": "https://github.com/spacatty/switchyard#readme",
   "bugs": {
-    "url": "https://github.com/spacatty/opencode-json-manager/issues"
+    "url": "https://github.com/spacatty/switchyard/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/spacatty/opencode-json-manager.git"
+    "url": "git+https://github.com/spacatty/switchyard.git"
   },
   "license": "MIT",
   "author": "spacatty",
