@@ -471,6 +471,9 @@
         "todo": {
           "type": "boolean"
         },
+        "background_compaction": {
+          "type": "boolean"
+        },
         "subagent_depth": {
           "type": "integer",
           "minimum": 0

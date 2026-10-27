@@ -1,13 +1,17 @@
 {
-  "name": "@spacatty/occ-manager",
-  "version": "0.1.0",
-  "description": "Web UI to edit your OpenCode config and add custom OpenAI-compatible model endpoints, with automatic model discovery.",
+  "name": "@spacatty/switchyard",
+  "version": "0.2.0",
+  "description": "One provider list for your coding agents: a local web UI that shares custom OpenAI-compatible providers between OpenCode, Z-Code and Pi, with automatic model discovery.",
   "keywords": [
     "opencode",
-    "config",
+    "zcode",
+    "pi",
+    "coding-agent",
     "llm",
     "openai-compatible",
+    "providers",
     "models",
+    "config",
     "cli"
   ],
   "homepage": "https://github.com/spacatty/opencode-json-manager#readme",
@@ -21,6 +25,7 @@
   "license": "MIT",
   "author": "spacatty",
   "bin": {
+    "switchyard": "bin/cli.js",
     "occ-manager": "bin/cli.js"
   },
   "files": [

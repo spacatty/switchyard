@@ -5,8 +5,8 @@
 const TOKEN = (() => {
   const t = new URLSearchParams(location.search).get('t');
   try {
-    if (t) sessionStorage.setItem('ocjm-token', t);
-    return t || sessionStorage.getItem('ocjm-token');
+    if (t) sessionStorage.setItem('switchyard-token', t);
+    return t || sessionStorage.getItem('switchyard-token');
   } catch {
     return t;
   }
@@ -92,6 +92,7 @@ async function api(method, path, body) {
   if (!res.ok) {
     const err = new Error(data.error || `HTTP ${res.status}`);
     err.attempts = data.attempts;
+    err.confirm = data.confirm;
     throw err;
   }
   return data;
@@ -185,7 +186,7 @@ const S = {
   savedText: '',
   schema: null,
   schemaSource: '',
-  view: 'providers',
+  view: 'shared',
   selected: null, // provider id
   editingModel: null,
   discovery: null,
@@ -197,6 +198,18 @@ const S = {
   mfilter: '',
   files: null, // { globalDir, projectDir, groups }
   doc: null, // { path, content, saved, exists }
+  zc: null, // Z-Code: { path, exists, doc, error, running, apiTypes, reserved, reasoningMaps, saved }
+  zsel: null, // Z-Code provider id
+  ztab: 'models',
+  zedit: null, // Z-Code model id being edited
+  shared: null, // { providers, harnesses, library } from /api/shared
+  sopen: null, // expanded shared provider key
+  ssel: {}, // shared provider key → Set of selected model ids
+  copying: null, // "key>harness" while a copy runs
+  pi: null, // Pi: { path, exists, doc, error, reserved, saved }
+  psel: null,
+  pptab: 'models',
+  pedit: null,
 };
 
 const isDirty = () => S.cfg && JSON.stringify(S.cfg) !== S.savedText;
@@ -229,6 +242,9 @@ function applyState(st) {
 
 async function load() {
   if (S.files) loadFiles();
+  loadZc();
+  loadPi();
+  loadShared();
   try {
     applyState(await api('GET', '/api/state'));
   } catch (e) {
@@ -306,19 +322,36 @@ function renderBanner() {
 function go(view) {
   if (location.hash.slice(1) !== view) location.hash = view;
   S.view = view;
+  enterView(view);
   render();
 }
 
-function render() {
+// Which harness each page belongs to; the shared page belongs to none.
+const VIEW_HARNESS = { providers: 'opencode', defaults: 'opencode', settings: 'opencode', files: 'opencode', raw: 'opencode', zcode: 'zcode', pi: 'pi' };
+const HARNESS_HOME = { opencode: 'providers', zcode: 'zcode', pi: 'pi' };
+
+function renderChrome() {
+  if (VIEW_HARNESS[S.view]) S.harness = VIEW_HARNESS[S.view];
   document.querySelectorAll('.nav').forEach((n) => n.classList.toggle('active', n.dataset.view === S.view));
+  document.querySelectorAll('#harness-switch button').forEach((b) => {
+    const on = b.dataset.harness === S.harness;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-pressed', String(on));
+  });
+  document.querySelectorAll('[data-harness-group]').forEach((g) => (g.hidden = g.dataset.harnessGroup !== S.harness));
+}
+
+function render() {
+  renderChrome();
   const main = document.getElementById('main');
-  if (!S.cfg && S.view !== 'files') {
+  if (S.discovery && S.discovery.target !== { providers: 'opencode', zcode: 'zcode', pi: 'pi', shared: 'library' }[S.view]) S.discovery = null;
+  if (!S.cfg && VIEW_HARNESS[S.view] === 'opencode' && S.view !== 'files') {
     main.replaceChildren(h('div', { class: 'empty' }, S.file?.error ? 'This file could not be parsed.' : 'Loading…'));
     return;
   }
   const scroller = document.getElementById('sheet');
   const scroll = scroller.scrollTop;
-  const view = { providers: viewProviders, defaults: viewDefaults, settings: viewSettings, files: viewFiles, raw: viewRaw }[S.view]();
+  const view = { providers: viewProviders, defaults: viewDefaults, settings: viewSettings, files: viewFiles, zcode: viewZcode, pi: viewPi, shared: viewShared, raw: viewRaw }[S.view]();
   if (S.lastView !== S.view) view.classList.add('fade-in');
   main.replaceChildren(view);
   scroller.scrollTop = S.lastView === S.view ? scroll : 0;
@@ -384,7 +417,7 @@ function viewProviders() {
     h(
       'div',
       { class: 'page-head' },
-      h('div', null, h('h1', null, 'Providers'), h('div', { class: 'sub' }, 'Connect OpenAI-compatible endpoints and choose which of their models OpenCode can use.')),
+      h('div', null, h('h1', null, 'OpenCode providers'), h('div', { class: 'sub' }, 'Connect OpenAI-compatible endpoints and choose which of their models OpenCode can use.')),
       h('div', { class: 'btn-row' }, h('button', { class: 'btn primary', onclick: () => startDiscovery(), disabled: adding }, icon('plus'), 'Add from endpoint'))
     ),
     h(
@@ -788,12 +821,49 @@ function jsonEditor(value, onApply, rows = 8) {
 
 // ---------- discovery ----------
 
-function startDiscovery(pid) {
-  const p = pid ? providers()[pid] : null;
+// Discovery fills a provider in one place, d.target: 'opencode', 'zcode', 'pi' or the shared 'library'.
+// Returns { name, models: { id: … }, headers } for the provider being filled.
+function discTarget(d) {
+  if (!d.pid) return null;
+  if (d.target === 'zcode') {
+    const r = zcRule(d.pid);
+    return r && { name: r.providerName || r.providerId, models: Object.fromEntries(zcModelRules(d.pid).map((m) => [m.modelId, m])), headers: r.config?.api?.headers };
+  }
+  if (d.target === 'pi') {
+    const p = piProviders()[d.pid];
+    return p && { name: p.name || d.pid, models: Object.fromEntries((p.models || []).map((m) => [m.id, m])), headers: p.headers };
+  }
+  if (d.target === 'library') {
+    const p = S.shared?.providers.find((x) => x.key === d.pid);
+    return p && { name: p.name, models: Object.fromEntries(p.models.map((m) => [m.id, m])), headers: p.headers };
+  }
+  const p = providers()[d.pid];
+  return p && { name: p.name, models: p.models || {}, headers: p.options?.headers };
+}
+const discTaken = (d, id) => (d.target === 'zcode' ? zcTaken(id) : d.target === 'pi' ? piTaken(id) : d.target === 'library' ? false : !!providers()[id]);
+
+// API formats each target can write, as [value, label].
+const API_CHOICES = {
+  zcode: [['openai-chat-completions', 'Chat completions'], ['anthropic-messages', 'Anthropic messages'], ['openai-responses', 'Responses']],
+  pi: [['openai-completions', 'Chat completions'], ['anthropic-messages', 'Anthropic messages'], ['openai-responses', 'Responses'], ['google-generative-ai', 'Google Generative AI']],
+  library: [['openai-chat', 'Chat completions'], ['anthropic', 'Anthropic messages'], ['openai-responses', 'Responses']],
+};
+function apiSelect(target, value, onchange) {
+  return h('select', { onchange: (e) => onchange(e.target.value) }, API_CHOICES[target].map(([v, l]) => h('option', { value: v, selected: v === value }, l)));
+}
+
+function startDiscovery(pid, target = 'opencode') {
+  const p = pid && target === 'opencode' ? providers()[pid] : null;
+  const z = pid && target === 'zcode' ? zcRule(pid)?.config : null;
+  const pp = pid && target === 'pi' ? piProviders()[pid] : null;
+  const sp = pid && target === 'library' ? S.shared?.providers.find((x) => x.key === pid) : null;
   S.discovery = {
+    target,
     pid: pid || null,
-    baseURL: p?.options?.baseURL || '',
-    apiKey: p?.options?.apiKey || '',
+    baseURL: p?.options?.baseURL || z?.api?.baseUrl || pp?.baseUrl || sp?.baseURL || '',
+    // A {cmd:…} key can't be resolved here; the endpoint list is often public anyway.
+    apiKey: p?.options?.apiKey || z?.access?.apiKey || piKeyRef(pp?.apiKey) || (sp?.apiKey?.startsWith('{cmd:') ? '' : sp?.apiKey) || '',
+    apiType: API_CHOICES[target]?.[0][0],
     keyMode: 'literal',
     envName: '',
     newId: '',
@@ -818,18 +888,18 @@ async function runDiscovery() {
   d.error = null;
   render();
   try {
-    const r = await api('POST', '/api/discover', { baseURL: d.baseURL.trim(), apiKey: d.apiKey.trim(), headers: d.pid ? providers()[d.pid]?.options?.headers : undefined });
+    const r = await api('POST', '/api/discover', { baseURL: d.baseURL.trim(), apiKey: d.apiKey.trim(), headers: discTarget(d)?.headers || undefined });
     d.result = r;
     d.baseURL = r.baseURL;
     if (!d.pid) {
-      let id = r.hint.id;
-      if (providers()[id]) id = id + '-2';
+      let id = d.target === 'opencode' ? r.hint.id : zcSlug(r.hint.id);
+      if (discTaken(d, id)) id = id + '-2';
       d.newId = d.newId || id;
       d.newName = d.newName || r.hint.name;
       d.newNpm = r.hint.npm || d.newNpm;
       d.envName = d.envName || r.hint.env?.[0] || '';
     }
-    const existing = d.pid ? providers()[d.pid]?.models || {} : {};
+    const existing = discTarget(d)?.models || {};
     d.selected = new Set(d.pid ? [] : r.models.filter((m) => m.recommended && r.models.length <= 15).map((m) => m.id));
     for (const id of Object.keys(existing)) d.selected.delete(id);
   } catch (e) {
@@ -862,7 +932,7 @@ const PRESETS = [
 
 function viewDiscovery() {
   const d = S.discovery;
-  const target = d.pid ? providers()[d.pid] : null;
+  const target = discTarget(d);
   const cancel = () => { S.discovery = null; render(); };
   const form = h(
     'div',
@@ -896,13 +966,13 @@ function viewDiscovery() {
   if (!d.result) return h('div', null, form);
 
   const r = d.result;
-  const existing = d.pid ? target?.models || {} : {};
+  const existing = target?.models || {};
   const providerCard = d.pid
     ? null
     : h(
         'div',
         { class: 'card flush' },
-        h('div', { class: 'card-head' }, avatar(d.newId || r.hint.id, d.newName || r.hint.name), h('div', { style: 'flex:1' }, h('h2', null, 'New provider'), h('div', { class: 'sub' }, `Detected ${r.hint.name} (${r.hint.source === 'guess' ? 'guessed from the URL' : 'from ' + r.hint.source})`, r.hint.doc ? [' · ', h('a', { href: r.hint.doc, target: '_blank', rel: 'noopener' }, 'Docs')] : null))),
+        h('div', { class: 'card-head' }, avatar(d.newId || r.hint.id, d.newName || r.hint.name), h('div', { style: 'flex:1' }, h('h2', null, { opencode: 'New OpenCode provider', zcode: 'New Z-Code provider', pi: 'New Pi provider', library: 'New shared provider' }[d.target]), h('div', { class: 'sub' }, `Detected ${r.hint.name} (${r.hint.source === 'guess' ? 'guessed from the URL' : 'from ' + r.hint.source})`, r.hint.doc ? [' · ', h('a', { href: r.hint.doc, target: '_blank', rel: 'noopener' }, 'Docs')] : null))),
         h(
           'div',
           { class: 'card-body' },
@@ -911,8 +981,10 @@ function viewDiscovery() {
             { class: 'grid four' },
             field('Provider ID', h('input', { type: 'text', class: 'mono-input', value: d.newId, oninput: (e) => (d.newId = e.target.value.trim()) }), 'Models become id/model-name'),
             field('Display name', h('input', { type: 'text', value: d.newName, oninput: (e) => (d.newName = e.target.value) })),
-            field('npm package', h('input', { type: 'text', class: 'mono-input', value: d.newNpm, list: 'npm-list2', oninput: (e) => (d.newNpm = e.target.value.trim()) })),
-            field(
+            d.target !== 'opencode'
+              ? field('API format', apiSelect(d.target, d.apiType, (v) => (d.apiType = v)), 'Most custom endpoints use Chat completions')
+              : field('npm package', h('input', { type: 'text', class: 'mono-input', value: d.newNpm, list: 'npm-list2', oninput: (e) => (d.newNpm = e.target.value.trim()) })),
+            d.target === 'zcode' ? null : field(
               'Store the API key as',
               h(
                 'select',
@@ -922,7 +994,7 @@ function viewDiscovery() {
                 h('option', { value: 'none', selected: d.keyMode === 'none' }, "Don't store a key")
               )
             ),
-            d.keyMode === 'env' ? field('Variable name', h('input', { type: 'text', class: 'mono-input', value: d.envName, oninput: (e) => (d.envName = e.target.value.trim()) }), `Saved as {env:${d.envName || 'NAME'}}`) : null
+            d.target !== 'zcode' && d.keyMode === 'env' ? field('Variable name', h('input', { type: 'text', class: 'mono-input', value: d.envName, oninput: (e) => (d.envName = e.target.value.trim()) }), `Saved as ${d.target === 'pi' ? '$' + (d.envName || 'NAME') : `{env:${d.envName || 'NAME'}}`}`) : null
           ),
           h('datalist', { id: 'npm-list2' }, NPM_OPTIONS.map((o) => h('option', { value: o })))
         )
@@ -1028,6 +1100,9 @@ function viewDiscovery() {
 
 function addSelected() {
   const d = S.discovery;
+  if (d.target === 'zcode') return zcAddSelected();
+  if (d.target === 'pi') return piAddSelected();
+  if (d.target === 'library') return libAddSelected();
   const r = d.result;
   let pid = d.pid;
   if (!pid) {
@@ -1571,6 +1646,1157 @@ function viewFiles() {
   return h('div', null, head, h('div', { class: 'files' }, tree, pane));
 }
 
+// ---------- Z-Code view ----------
+// Edits ~/.zcode/v2/provider_config.json. Custom providers are personal provider
+// rules; their models are "manual" model rules that must spell out every field.
+
+const ZC_API_LABELS = { 'openai-chat-completions': 'Chat completions', 'anthropic-messages': 'Anthropic messages', 'openai-responses': 'Responses' };
+const ZC_LEVELS = ['disabled', 'low', 'medium', 'high'];
+
+const zcDirty = () => !!(S.zc?.doc && JSON.stringify(S.zc.doc) !== S.zc.saved);
+const zcCfg = () => S.zc.doc.config;
+function zcRules() {
+  const c = zcCfg();
+  if (!isObj(c.providerConfigRules)) c.providerConfigRules = { providerRules: [] };
+  if (!Array.isArray(c.providerConfigRules.providerRules)) c.providerConfigRules.providerRules = [];
+  return c.providerConfigRules.providerRules;
+}
+function zcModelCfg() {
+  const c = zcCfg();
+  if (!isObj(c.modelConfigRules)) c.modelConfigRules = {};
+  for (const k of ['providerModelRules', 'manualProviderModelRules']) if (!Array.isArray(c.modelConfigRules[k])) c.modelConfigRules[k] = [];
+  return c.modelConfigRules;
+}
+const zcRule = (pid) => (S.zc?.doc ? zcRules().find((r) => r.providerId === pid) : null);
+const zcModelRules = (pid) => zcModelCfg().manualProviderModelRules.filter((m) => m.providerId === pid);
+const zcModel = (pid, mid) => zcModelCfg().manualProviderModelRules.find((m) => m.providerId === pid && m.modelId === mid);
+// Same normalisation Z-Code uses for new provider IDs.
+const zcSlug = (v) => String(v).trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'new-provider';
+const zcTaken = (id) => !!zcRule(id) || S.zc.reserved.includes(id);
+function zcUniqueId(seed) {
+  const base = zcSlug(seed);
+  if (!zcTaken(base)) return base;
+  for (let n = 2; ; n++) if (!zcTaken(`${base}-${n}`)) return `${base}-${n}`;
+}
+
+function zcNewModel(pid, mid, { contextWindow = 128000, max = 32000, reasoning = false, image = false, pdf = false, video = false } = {}) {
+  const apiType = zcRule(pid)?.config?.api?.type || 'openai-chat-completions';
+  return {
+    providerId: pid,
+    modelId: mid,
+    config: {
+      enabled: true,
+      properties: {
+        contextWindow,
+        supportsJsonSchemaOutput: false,
+        supportsNativeWebSearch: false,
+        supportsMidConversationSystem: false,
+        inputFormat: { supportsImage: image, supportsVideo: video, supportsPdf: pdf },
+      },
+      optionSpecs: {
+        reasoningLevel: reasoning ? { values: [...ZC_LEVELS], map: S.zc.reasoningMaps[apiType] } : { values: ['disabled'], map: '{}' },
+        maxOutputTokens: { max },
+      },
+    },
+  };
+}
+
+// Keeps the provider's personalModelIds / modelOrder in step with its manual model rules.
+function zcSyncIds(pid) {
+  const r = zcRule(pid);
+  if (!r) return;
+  r.config = r.config || {};
+  const ids = zcModelRules(pid).map((m) => m.modelId);
+  const merge = (list) => [...(list || []).filter((id) => ids.includes(id)), ...ids.filter((id) => !(list || []).includes(id))];
+  r.config.personalModelIds = merge(r.config.personalModelIds);
+  // Built-in providers also list their own models in modelOrder, so only append there.
+  r.config.modelOrder = r.templateId ? [...(r.config.modelOrder || []), ...ids.filter((id) => !(r.config.modelOrder || []).includes(id))] : merge(r.config.modelOrder);
+}
+
+function zcPutModel(rule) {
+  const list = zcModelCfg().manualProviderModelRules;
+  const i = list.findIndex((m) => m.providerId === rule.providerId && m.modelId === rule.modelId);
+  if (i >= 0) list[i] = rule;
+  else list.push(rule);
+  zcSyncIds(rule.providerId);
+}
+
+function zcRemoveModel(pid, mid) {
+  const mc = zcModelCfg();
+  mc.manualProviderModelRules = mc.manualProviderModelRules.filter((m) => !(m.providerId === pid && m.modelId === mid));
+  const r = zcRule(pid);
+  if (r?.config?.modelOrder) r.config.modelOrder = r.config.modelOrder.filter((id) => id !== mid);
+  zcSyncIds(pid);
+}
+
+function zcAddProvider({ name, baseUrl = '', apiKey = '', apiType = 'openai-chat-completions', id } = {}) {
+  const pid = id || zcUniqueId(name || 'new-provider');
+  zcRules().push({
+    providerId: pid,
+    providerName: name || pid,
+    config: { group: 'standard-personal', access: { type: 'api-key', apiKey: apiKey || null }, api: { type: apiType, baseUrl }, personalModelIds: [], modelOrder: [] },
+  });
+  const c = zcCfg();
+  c.providerOrder = [...(c.providerOrder || []).filter((x) => x !== pid), pid];
+  return pid;
+}
+
+async function loadZc() {
+  try {
+    const r = await api('GET', '/api/zcode');
+    S.zc = { ...r, saved: r.doc ? JSON.stringify(r.doc) : '' };
+  } catch (e) {
+    S.zc = { error: e.message, doc: null };
+  }
+  if (S.zsel && !zcRule(S.zsel)) S.zsel = null;
+  zcCount();
+  if (S.view === 'zcode') render();
+}
+
+function zcCount() {
+  document.getElementById('count-zcode').textContent = (S.zc?.doc && zcRules().filter((r) => !r.templateId).length) || '';
+}
+
+async function saveZc() {
+  if (S.zc.running && !confirm('Z-Code is running. It rewrites this file from memory when it exits, which would undo these changes.\n\nQuit Z-Code first (including the tray icon), then save. Save anyway?')) return;
+  try {
+    const r = await api('POST', '/api/zcode/save', { doc: S.zc.doc });
+    S.zc = { ...S.zc, ...r, saved: JSON.stringify(r.doc) };
+    render();
+    toast(r.backup ? `Saved. Backup: ${r.backup}` : 'Saved.');
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+function zcChanged() {
+  zcCount();
+  render();
+}
+
+function zcApiSelect(value, onchange) {
+  return h('select', { onchange: (e) => onchange(e.target.value) }, (S.zc?.apiTypes || Object.keys(ZC_API_LABELS)).map((t) => h('option', { value: t, selected: t === value }, ZC_API_LABELS[t] || t)));
+}
+
+const startZcDiscovery = (pid) => startDiscovery(pid, 'zcode');
+
+function zcAddSelected() {
+  const d = S.discovery;
+  let pid = d.pid;
+  if (!pid) {
+    const id = zcSlug(d.newId);
+    if (zcTaken(id)) return toast(`Provider "${id}" already exists or is a Z-Code built-in. Pick another ID.`, 'error');
+    pid = zcAddProvider({ id, name: d.newName || id, baseUrl: d.baseURL, apiKey: d.apiKey.trim(), apiType: d.apiType });
+  }
+  let added = 0;
+  for (const m of d.result.models) {
+    if (!d.selected.has(m.id) || (zcModel(pid, m.id) && !d.overwrite)) continue;
+    const s = m.suggestion;
+    const ctx = s.limit?.context || 128000;
+    const inp = s.modalities?.input || [];
+    zcPutModel(zcNewModel(pid, m.id, { contextWindow: ctx, max: s.limit?.output || Math.min(32000, ctx), reasoning: !!s.reasoning, image: !!s.attachment || inp.includes('image'), pdf: inp.includes('pdf'), video: inp.includes('video') }));
+    added++;
+  }
+  S.discovery = null;
+  S.zsel = pid;
+  S.ztab = 'models';
+  zcChanged();
+  toast(`Added ${added} model${added === 1 ? '' : 's'} to ${pid}. Save to write the file.`);
+}
+
+function viewZcode() {
+  const z = S.zc;
+  const head = (actions) =>
+    h('div', { class: 'page-head' }, h('div', null, h('h1', null, 'Z-Code providers'), h('div', { class: 'sub' }, 'Custom OpenAI- or Anthropic-compatible providers for the Z-Code desktop app, with models picked from the endpoint.')), actions);
+  if (!z) return h('div', null, head(null), h('div', { class: 'card empty' }, 'Loading…'));
+  if (!z.doc) return h('div', null, head(null), h('div', { class: 'error-box' }, icon('alert'), h('span', null, `Could not read ${z.path || 'the Z-Code config'}: ${z.error}`)));
+
+  const rules = zcRules();
+  if (!S.discovery && (!S.zsel || !zcRule(S.zsel)) && rules.length) S.zsel = (rules.find((r) => !r.templateId) || rules[0]).providerId;
+  const adding = !!(S.discovery && !S.discovery.pid);
+  const dirty = zcDirty();
+  const addBlank = () => {
+    const name = prompt('Provider name (shown in Z-Code):', 'My provider')?.trim();
+    if (!name) return;
+    S.zsel = zcAddProvider({ name });
+    S.discovery = null;
+    S.ztab = 'connection';
+    zcChanged();
+  };
+
+  const notes = [];
+  if (z.running) notes.push(h('div', { class: 'note warn' }, icon('alert'), h('span', null, h('b', null, 'Z-Code is running. '), 'It rewrites this file when it exits and would undo your changes. Quit it (including the tray icon) before saving, then reopen it.')));
+  if (!z.exists) notes.push(h('div', { class: 'note info' }, icon('info'), h('span', null, 'No Z-Code provider config yet. Saving creates ', h('code', null, z.path), '.')));
+
+  const list = h(
+    'div',
+    { class: 'card plist' },
+    h('div', { class: 'plist-head' }, h('h2', null, 'Z-Code providers'), h('span', { class: 'count' }, rules.length)),
+    rules.length ? null : h('div', { class: 'empty-inline' }, 'Nothing here yet.'),
+    rules.map((r) => {
+      const n = zcModelRules(r.providerId).length;
+      return h(
+        'button',
+        { class: 'pitem' + (S.zsel === r.providerId && !S.discovery ? ' active' : ''), onclick: () => { S.zsel = r.providerId; S.discovery = null; S.zedit = null; render(); } },
+        avatar(r.providerId, r.providerName || r.providerId),
+        h('span', { class: 'ptxt' }, h('span', { class: 'pname' }, r.providerName || r.providerId), h('span', { class: 'purl' }, r.templateId ? `Built-in · ${r.templateId}` : (r.config?.api?.baseUrl || 'No base URL').replace(/^https?:\/\//, ''))),
+        h('span', { class: 'pn', title: `${n} custom model${n === 1 ? '' : 's'}` }, n)
+      );
+    }),
+    adding ? h('button', { class: 'pitem active' }, h('span', { class: 'avatar', style: '--h: var(--accent)' }, icon('plus')), h('span', { class: 'ptxt' }, h('span', { class: 'pname' }, 'New provider'), h('span', { class: 'purl' }, S.discovery.baseURL.replace(/^https?:\/\//, '') || 'Connect an endpoint'))) : null,
+    h('div', { class: 'plist-add' }, h('button', { class: 'btn ghost sm', onclick: addBlank, title: 'Create a provider and fill in its details by hand' }, icon('plus'), 'Blank provider'))
+  );
+
+  let right;
+  if (S.discovery) right = viewDiscovery();
+  else if (S.zsel && zcRule(S.zsel)) right = viewZcProvider(S.zsel);
+  else
+    right = h(
+      'div',
+      { class: 'card empty' },
+      h('span', { class: 'icon-chip' }, icon('link')),
+      h('h2', null, 'Add a custom provider to Z-Code'),
+      h('p', null, "Paste an OpenAI-compatible base URL and pick models from its list, so you don't have to type model IDs and limits into Z-Code by hand."),
+      h('button', { class: 'btn primary', onclick: () => startZcDiscovery() }, icon('plus'), 'Add from endpoint')
+    );
+
+  return h(
+    'div',
+    null,
+    head(
+      h(
+        'div',
+        { class: 'btn-row' },
+        h('button', { class: 'btn ghost', onclick: () => { if (!dirty || confirm('Discard unsaved Z-Code changes?')) loadZc(); }, title: 'Reload the file from disk' }, icon('refresh'), dirty ? 'Discard' : 'Reload'),
+        h('button', { class: 'btn', onclick: () => startZcDiscovery(), disabled: adding }, icon('plus'), 'Add from endpoint'),
+        h('button', { class: 'btn primary', onclick: saveZc, disabled: !dirty }, 'Save')
+      )
+    ),
+    h('div', { class: 'muted small', style: 'margin:-8px 0 14px' }, h('code', null, z.path), dirty ? h('span', { class: 'tag amber', style: 'margin-left:8px' }, 'Unsaved') : null),
+    notes,
+    h('div', { class: 'split' }, list, right)
+  );
+}
+
+function viewZcProvider(pid) {
+  const r = zcRule(pid);
+  const builtin = !!r.templateId;
+  const cfg = (r.config = r.config || {});
+  const models = zcModelRules(pid);
+  const baseUrl = cfg.api?.baseUrl;
+  const set = (fn) => { fn(); zcChanged(); };
+  const tab = (id, label, count) =>
+    h('button', { class: 'tab' + (S.ztab === id ? ' on' : ''), role: 'tab', 'aria-selected': String(S.ztab === id), onclick: () => { S.ztab = id; render(); } }, label, count !== undefined ? h('span', { class: 'tcount' }, count) : null);
+  const remove = () => {
+    if (!confirm(`Delete provider "${pid}" and its ${models.length} custom models from the Z-Code config?`)) return;
+    const c = zcCfg();
+    c.providerConfigRules.providerRules = zcRules().filter((x) => x.providerId !== pid);
+    c.providerOrder = (c.providerOrder || []).filter((x) => x !== pid);
+    const mc = zcModelCfg();
+    mc.manualProviderModelRules = mc.manualProviderModelRules.filter((m) => m.providerId !== pid);
+    mc.providerModelRules = mc.providerModelRules.filter((m) => m.providerId !== pid);
+    S.zsel = null;
+    zcChanged();
+  };
+  const addById = () => {
+    const id = prompt('Model ID exactly as the endpoint expects it:')?.trim();
+    if (!id) return;
+    if (zcModel(pid, id)) return toast('That model is already added', 'error');
+    zcPutModel(zcNewModel(pid, id));
+    S.zedit = id;
+    S.ztab = 'models';
+    zcChanged();
+  };
+
+  const hero = h(
+    'div',
+    { class: 'phero' },
+    h(
+      'div',
+      { class: 'phero-top' },
+      avatar(pid, r.providerName || pid, 'lg'),
+      h(
+        'div',
+        { class: 'phero-title' },
+        h('h2', null, r.providerName || pid, h('span', { class: 'tag mono plain' }, pid)),
+        h(
+          'div',
+          { class: 'phero-meta' },
+          builtin ? h('span', { class: 'tag violet' }, `Built-in · ${r.templateId}`) : baseUrl ? h('span', { class: 'url', title: baseUrl }, baseUrl) : h('span', { class: 'tag amber' }, 'No base URL'),
+          cfg.api?.type ? h('span', { class: 'tag blue' }, ZC_API_LABELS[cfg.api.type] || cfg.api.type) : null,
+          cfg.access?.apiKey ? h('span', { class: 'tag green' }, icon('key'), 'key set') : null
+        )
+      ),
+      h(
+        'div',
+        { class: 'btn-row' },
+        h('button', { class: 'btn sm', onclick: () => startZcDiscovery(pid), disabled: !baseUrl, title: baseUrl ? 'List the models this endpoint serves' : 'Set a base URL first' }, icon('download'), 'Fetch models'),
+        h('button', { class: 'btn sm icon ghost danger', onclick: remove, title: 'Delete provider', 'aria-label': 'Delete provider' }, icon('trash'))
+      )
+    ),
+    h('div', { class: 'tabs', role: 'tablist' }, tab('models', 'Models', models.length), tab('connection', 'Connection'), tab('json', 'JSON'))
+  );
+
+  let panel;
+  if (S.ztab === 'connection' && builtin) {
+    panel = h('div', { class: 'card-body tabpanel' }, h('div', { class: 'note info' }, icon('info'), h('span', null, "This is one of Z-Code's built-in providers. Its sign-in and key are managed inside Z-Code; you can still add custom models to it here.")));
+  } else if (S.ztab === 'connection') {
+    const headers = cfg.api?.headers || {};
+    const setApi = (k, v) =>
+      set(() => {
+        cfg.api = { type: 'openai-chat-completions', baseUrl: '', ...cfg.api };
+        if (v === undefined) delete cfg.api[k];
+        else cfg.api[k] = v;
+      });
+    panel = h(
+      'div',
+      { class: 'card-body tabpanel' },
+      h(
+        'div',
+        { class: 'grid two' },
+        field('Base URL', textInput(baseUrl, (v) => setApi('baseUrl', v.trim()), { placeholder: 'https://api.together.xyz/v1', class: 'mono-input' }), 'The API root, usually ending in /v1'),
+        field('API key', apiKeyInput(cfg.access?.apiKey, (v) => set(() => (cfg.access = { type: 'api-key', apiKey: v.trim() || null }))), 'Stored as plain text: Z-Code cannot read environment variables'),
+        field('Display name', textInput(r.providerName, (v) => set(() => (r.providerName = v.trim() || pid))), 'Shown in the Z-Code model picker'),
+        field('API format', zcApiSelect(cfg.api?.type || 'openai-chat-completions', (v) => setApi('type', v)), 'Chat completions fits most OpenAI-compatible endpoints')
+      ),
+      h('div', { class: 'ep-title', style: 'margin-top:28px' }, 'Custom headers', h('span', { class: 'count', style: 'font-size:13px' }, Object.keys(headers).length || '')),
+      Object.entries(headers).map(([k, v]) =>
+        h(
+          'div',
+          { class: 'kv' },
+          textInput(k, (nk) => setApi('headers', renameKey(headers, k, nk.trim())), { class: 'mono-input', 'aria-label': 'Header name' }),
+          textInput(v, (nv) => setApi('headers', { ...headers, [k]: nv }), { 'aria-label': `${k} value` }),
+          h('button', { class: 'btn icon ghost danger', title: `Remove ${k}`, 'aria-label': `Remove ${k}`, onclick: () => { const rest = { ...headers }; delete rest[k]; setApi('headers', Object.keys(rest).length ? rest : undefined); } }, icon('x'))
+        )
+      ),
+      h('button', { class: 'btn sm soft', onclick: () => setApi('headers', { ...headers, ['X-Header-' + (Object.keys(headers).length + 1)]: '' }) }, icon('plus'), 'Add header')
+    );
+  } else if (S.ztab === 'json') {
+    panel = h(
+      'div',
+      { class: 'card-body tabpanel' },
+      h('div', { class: 'note info', style: 'margin-bottom:16px' }, icon('info'), h('span', null, 'The raw provider rule. Apply updates the page; Save writes the file.')),
+      jsonEditor(r, (v) => {
+        if (!isObj(v) || v.providerId !== pid) throw new Error(`Must be an object with providerId "${pid}"`);
+        zcRules()[zcRules().indexOf(r)] = v;
+        zcChanged();
+      }, 18)
+    );
+  } else {
+    panel = h(
+      'div',
+      { class: 'tabpanel' },
+      models.length
+        ? [
+            h('div', { class: 'toolbar' }, h('span', { class: 'muted small' }, `${models.length} custom model${models.length === 1 ? '' : 's'}`), h('span', { class: 'spacer' }), h('button', { class: 'btn sm ghost', onclick: addById }, icon('plus'), 'Add by ID'), h('button', { class: 'btn sm soft', onclick: () => startZcDiscovery(pid), disabled: !baseUrl }, icon('download'), 'Fetch more')),
+            zcModelsTable(pid),
+          ]
+        : h(
+            'div',
+            { class: 'empty' },
+            h('span', { class: 'icon-chip', style: '--h: var(--violet)' }, icon('layers')),
+            h('h2', null, 'No custom models yet'),
+            h('p', null, baseUrl ? 'Fetch the list this endpoint serves and pick the ones you want, or add a model by its ID.' : builtin ? 'Add a model by its ID.' : 'Set a base URL on the Connection tab first, then fetch its models.'),
+            h(
+              'div',
+              { class: 'btn-row', style: 'justify-content:center' },
+              builtin && !baseUrl ? null : h('button', { class: 'btn primary', onclick: () => (baseUrl ? startZcDiscovery(pid) : ((S.ztab = 'connection'), render())) }, icon(baseUrl ? 'download' : 'link'), baseUrl ? 'Fetch models' : 'Set base URL'),
+              h('button', { class: 'btn', onclick: addById }, 'Add by ID')
+            )
+          )
+    );
+  }
+  return h('div', { class: 'card flush' }, hero, panel);
+}
+
+function zcModelsTable(pid) {
+  const r = zcRule(pid);
+  const rows = [];
+  for (const m of zcModelRules(pid)) {
+    const mid = m.modelId;
+    const p = m.config?.properties || {};
+    const o = m.config?.optionSpecs || {};
+    const levels = (o.reasoningLevel?.values || []).filter((v) => v !== 'disabled' && v !== 'none');
+    const ref = `zc:${pid}/${mid}`;
+    const test = S.tests[ref];
+    const editing = S.zedit === mid;
+    const tag = (on, label, hue, title) => (on ? h('span', { class: `tag ${hue}`, title }, label) : null);
+    rows.push(
+      h(
+        'tr',
+        { class: editing ? 'editing' : '' },
+        h('td', null, h('div', { class: 'mcell' }, h('div', { class: 'mid', title: mid }, mid), h('div', { class: 'msub' }, m.config?.enabled === false ? h('span', { class: 'tag off round' }, 'Disabled') : null))),
+        h('td', { class: 'num' }, limitsCell({ context: p.contextWindow, output: o.maxOutputTokens?.max })),
+        h(
+          'td',
+          null,
+          h(
+            'div',
+            { class: 'caps' },
+            tag(levels.length, 'Reasoning', 'violet', `Levels: ${levels.join(', ')}`),
+            tag(p.inputFormat?.supportsImage, 'Vision', 'rose', 'Image input'),
+            tag(p.inputFormat?.supportsPdf, 'PDF', 'amber', 'PDF input'),
+            tag(p.inputFormat?.supportsVideo, 'Video', 'cyan', 'Video input'),
+            tag(p.supportsNativeWebSearch, 'Web', 'teal', 'Native web search')
+          )
+        ),
+        h(
+          'td',
+          { class: 'actions' },
+          h(
+            'div',
+            { class: 'row-actions' },
+            h('button', { class: 'btn sm icon ghost', onclick: () => zcRunTest(pid, mid), title: 'Send a tiny test request', 'aria-label': `Test ${mid}`, disabled: !r.config?.api?.baseUrl }, test?.loading ? h('span', { class: 'spinner' }) : icon('play')),
+            h('button', { class: 'btn sm icon ' + (editing ? 'soft' : 'ghost'), onclick: () => { S.zedit = editing ? null : mid; render(); }, title: editing ? 'Close editor' : 'Edit model', 'aria-label': editing ? 'Close editor' : `Edit ${mid}` }, icon(editing ? 'x' : 'edit')),
+            h('button', { class: 'btn sm icon ghost danger', onclick: () => { zcRemoveModel(pid, mid); zcChanged(); }, title: `Remove ${mid}`, 'aria-label': `Remove ${mid}` }, icon('trash'))
+          )
+        )
+      )
+    );
+    if (test && !test.loading) rows.push(h('tr', { class: 'result-row' }, h('td', { colspan: 4 }, test.ok ? h('div', { class: 'ok-box' }, icon('check'), `Replied in ${test.ms} ms: "${test.reply}"`) : h('div', { class: 'error-box' }, icon('alert'), `Failed ${test.status || ''} ${test.error}`))));
+    if (editing) rows.push(h('tr', { class: 'model-edit' }, h('td', { colspan: 4 }, zcModelEditor(pid, mid))));
+  }
+  return h(
+    'div',
+    { class: 'tablewrap' },
+    h('table', null, h('thead', null, h('tr', null, h('th', null, 'Model'), h('th', { class: 'num', title: 'Context window and max output, in tokens' }, 'Limits'), h('th', null, 'Capabilities'), h('th', null))), h('tbody', null, rows))
+  );
+}
+
+async function zcRunTest(pid, mid) {
+  const a = zcRule(pid).config;
+  if (a.api?.type !== 'openai-chat-completions') toast('Test uses the OpenAI-style /chat/completions call; it may not work for this API format.');
+  const ref = `zc:${pid}/${mid}`;
+  S.tests[ref] = { loading: true };
+  render();
+  try {
+    S.tests[ref] = await api('POST', '/api/test', { baseURL: a.api?.baseUrl, apiKey: a.access?.apiKey || '', headers: a.api?.headers, model: mid });
+  } catch (e) {
+    S.tests[ref] = { ok: false, error: e.message };
+  }
+  render();
+}
+
+function zcModelEditor(pid, mid) {
+  const m = zcModel(pid, mid);
+  const c = m.config;
+  const p = c.properties;
+  const o = c.optionSpecs;
+  const setR = (fn) => { fn(); zcChanged(); };
+  const apiType = zcRule(pid)?.config?.api?.type || 'openai-chat-completions';
+  const setLevels = (text) =>
+    setR(() => {
+      const vals = [...new Set(text.split(',').map((v) => v.trim()).filter(Boolean))];
+      o.reasoningLevel.values = vals.length ? vals : ['disabled'];
+      const reasons = o.reasoningLevel.values.some((v) => v !== 'disabled' && v !== 'none');
+      // Without levels nothing extra is sent; turning levels on picks up Z-Code's default mapping.
+      if (reasons && o.reasoningLevel.map === '{}') o.reasoningLevel.map = S.zc.reasoningMaps[apiType];
+      if (!reasons) o.reasoningLevel.map = '{}';
+    });
+  const flag = (label, get, put) => h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: !!get(), onchange: (e) => setR(() => put(e.target.checked)) }), label);
+  const posInt = (v, fallback) => (Number.isInteger(v) && v > 0 ? v : fallback);
+  return h(
+    'div',
+    { class: 'editor-panel' },
+    h(
+      'div',
+      { class: 'ep-section' },
+      h('div', { class: 'ep-title' }, 'General'),
+      h(
+        'div',
+        { class: 'grid four' },
+        field('Context window', numInput(p.contextWindow, (v) => setR(() => (p.contextWindow = posInt(v, p.contextWindow))), { placeholder: 'tokens', min: 1, step: 1 })),
+        field('Max output', numInput(o.maxOutputTokens?.max, (v) => setR(() => (o.maxOutputTokens = { ...o.maxOutputTokens, max: posInt(v, o.maxOutputTokens?.max || 32000) })), { placeholder: 'tokens', min: 1, step: 1 })),
+        field('Reasoning levels', textInput((o.reasoningLevel?.values || []).join(', '), setLevels, { class: 'mono-input', placeholder: 'disabled, low, medium, high' }), 'Comma-separated, lowest first. Only "disabled" turns reasoning off.')
+      )
+    ),
+    h(
+      'div',
+      { class: 'ep-section' },
+      h('div', { class: 'ep-title' }, 'Capabilities'),
+      h(
+        'div',
+        { class: 'btn-row', style: 'flex-wrap:wrap;gap:8px 20px' },
+        flag('Enabled', () => c.enabled !== false, (v) => (c.enabled = v)),
+        flag('Image input', () => p.inputFormat.supportsImage, (v) => (p.inputFormat.supportsImage = v)),
+        flag('PDF input', () => p.inputFormat.supportsPdf, (v) => (p.inputFormat.supportsPdf = v)),
+        flag('Video input', () => p.inputFormat.supportsVideo, (v) => (p.inputFormat.supportsVideo = v)),
+        flag('JSON schema output', () => p.supportsJsonSchemaOutput, (v) => (p.supportsJsonSchemaOutput = v)),
+        flag('Native web search', () => p.supportsNativeWebSearch, (v) => (p.supportsNativeWebSearch = v)),
+        flag('Mid-conversation system messages', () => p.supportsMidConversationSystem, (v) => (p.supportsMidConversationSystem = v))
+      )
+    ),
+    h(
+      'div',
+      { class: 'ep-section' },
+      h(
+        'details',
+        { class: 'adv' },
+        h('summary', null, 'Model JSON (request mapping for reasoning and max output)'),
+        h(
+          'div',
+          { class: 'body' },
+          jsonEditor(m, (v) => {
+            if (!isObj(v) || v.providerId !== pid || !v.modelId) throw new Error(`Must keep providerId "${pid}" and a modelId`);
+            zcRemoveModel(pid, mid);
+            zcPutModel(v);
+            S.zedit = v.modelId;
+            zcChanged();
+          }, 14)
+        )
+      )
+    )
+  );
+}
+
+// ---------- shared providers view ----------
+// One list of every custom provider found in OpenCode, Z-Code and Pi, plus the
+// ones saved in Switchyard's library, matched by endpoint. Copies go straight to
+// the harness file on disk (with a .bak), so unsaved edits there must be saved first.
+
+const HARNESS_LIST = [
+  ['opencode', 'OpenCode', 'violet'],
+  ['zcode', 'Z-Code', 'cyan'],
+  ['pi', 'Pi', 'amber'],
+];
+const harnessName = (id) => HARNESS_LIST.find(([h]) => h === id)?.[1] || id;
+const harnessDirty = (id) => (id === 'opencode' ? isDirty() : id === 'zcode' ? zcDirty() : piDirty());
+
+async function loadShared() {
+  try {
+    S.shared = await api('GET', '/api/shared');
+  } catch (e) {
+    S.shared = { error: e.message, providers: [], harnesses: [] };
+  }
+  document.getElementById('count-shared').textContent = S.shared.providers.length || '';
+  if (S.view === 'shared') render();
+}
+
+async function sharedCopy(p, to, models) {
+  if (harnessDirty(to)) return toast(`Save or discard your unsaved ${harnessName(to)} changes first.`, 'error');
+  S.copying = `${p.key}>${to}`;
+  render();
+  const send = (force) => api('POST', '/api/shared/copy', { key: p.key, to, models, force });
+  try {
+    let r;
+    try {
+      r = await send(false);
+    } catch (e) {
+      if (!e.confirm || !confirm(e.message)) throw e;
+      r = await send(true);
+    }
+    S.shared = r;
+    const res = r.result;
+    toast(`${res.added ? `Copied ${res.added} model${res.added === 1 ? '' : 's'}` : 'Already up to date'} in ${harnessName(to)} as "${res.id}".${res.notes.length ? ' Note: ' + res.notes.join('; ') + '.' : ''}`);
+    if (to === 'opencode') applyState(await api('GET', '/api/state'));
+    else if (to === 'zcode') await loadZc();
+    else await loadPi();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+  S.copying = null;
+  render();
+}
+
+async function sharedSaveToLibrary(p) {
+  try {
+    S.shared = await api('POST', '/api/shared/library/save', { provider: { id: p.key, name: p.name, baseURL: p.baseURL, api: p.api, apiKey: p.apiKey, headers: p.headers, models: p.models } });
+    toast(`Saved "${p.name}" to the library. It stays listed even if you remove it from every harness.`);
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+  render();
+}
+
+async function sharedForget(p) {
+  if (!confirm(`Remove "${p.name}" from the library? Harness configs are not touched.`)) return;
+  try {
+    S.shared = await api('POST', '/api/shared/library/remove', { key: p.key });
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+  render();
+}
+
+function sharedAddByHand() {
+  const baseURL = prompt('Base URL of the OpenAI-compatible endpoint:', 'https://')?.trim();
+  if (!baseURL || baseURL === 'https://') return;
+  const name = prompt('Display name:', baseURL.replace(/^https?:\/\//, '').split(/[/:]/)[0])?.trim();
+  if (!name) return;
+  api('POST', '/api/shared/library/save', { provider: { name, baseURL, api: 'openai-chat', models: [] } })
+    .then((r) => {
+      S.shared = r;
+      S.sopen = r.providers.find((p) => p.baseURL === baseURL)?.key || null;
+      render();
+      toast('Saved to the library. Add models with "Fetch models".');
+    })
+    .catch((e) => toast(e.message, 'error'));
+}
+
+// Converts a discovered model suggestion (OpenCode shape) to the shared model shape.
+function sharedModel(m) {
+  const s = m.suggestion;
+  const inp = s.modalities?.input || [];
+  const out = { id: m.id, name: s.name, context: s.limit?.context, output: s.limit?.output, reasoning: s.reasoning, vision: s.attachment ?? (inp.length ? inp.includes('image') : undefined), toolCall: s.tool_call };
+  if (inp.includes('pdf')) out.pdf = true;
+  if (inp.includes('video')) out.video = true;
+  if (s.cost) out.cost = { input: s.cost.input, output: s.cost.output, cacheRead: s.cost.cache_read, cacheWrite: s.cost.cache_write };
+  return JSON.parse(JSON.stringify(out));
+}
+
+async function libAddSelected() {
+  const d = S.discovery;
+  const existing = d.pid ? S.shared.providers.find((p) => p.key === d.pid) : null;
+  const picked = d.result.models.filter((m) => d.selected.has(m.id)).map(sharedModel);
+  const key = d.apiKey.trim();
+  const apiKey = existing ? existing.apiKey : d.keyMode === 'literal' ? key || undefined : d.keyMode === 'env' && d.envName ? `{env:${d.envName}}` : undefined;
+  const models = [...(existing?.models || [])];
+  for (const m of picked) {
+    const i = models.findIndex((x) => x.id === m.id);
+    if (i < 0) models.push(m);
+    else if (d.overwrite) models[i] = m;
+  }
+  try {
+    const r = await api('POST', '/api/shared/library/save', { provider: { id: d.newId || existing?.key, name: existing?.name || d.newName || d.newId, baseURL: d.baseURL, api: existing?.api || d.apiType, apiKey, headers: existing?.headers, models } });
+    S.shared = r;
+    S.discovery = null;
+    S.sopen = r.providers.find((p) => p.key === existing?.key || p.baseURL === d.baseURL)?.key || null;
+    render();
+    toast(`Saved ${picked.length} model${picked.length === 1 ? '' : 's'} to the library. Copy the provider to a harness to use it.`);
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+function viewShared() {
+  const sh = S.shared;
+  const head = h(
+    'div',
+    { class: 'page-head' },
+    h('div', null, h('h1', null, 'Shared providers'), h('div', { class: 'sub' }, 'Every custom provider found in your harnesses, matched by endpoint. Copy one to another harness in one click, or keep it in the library.')),
+    h(
+      'div',
+      { class: 'btn-row' },
+      h('button', { class: 'btn ghost', onclick: loadShared, title: 'Re-read every config from disk' }, icon('refresh'), 'Reload'),
+      h('button', { class: 'btn', onclick: sharedAddByHand }, icon('plus'), 'Add by hand'),
+      h('button', { class: 'btn primary', onclick: () => startDiscovery(null, 'library'), disabled: !!S.discovery }, icon('download'), 'Add from endpoint')
+    )
+  );
+  if (!sh) return h('div', null, head, h('div', { class: 'card empty' }, 'Loading…'));
+  if (S.discovery) return h('div', null, head, viewDiscovery());
+
+  const status = h(
+    'div',
+    { class: 'stats' },
+    sh.harnesses.map((x) => {
+      const [, name, hue] = HARNESS_LIST.find(([id]) => id === x.id);
+      const n = sh.providers.filter((p) => p.in[x.id]).length;
+      const val = x.error ? h('span', { class: 'val', style: 'color:var(--danger)' }, 'Unreadable file') : h('span', { class: 'val big' }, n, h('span', null, `provider${n === 1 ? '' : 's'}${x.exists ? '' : ' · no file yet'}`));
+      return h(
+        'button',
+        { class: 'stat', title: x.path, onclick: () => go(HARNESS_HOME[x.id]) },
+        h('span', { class: 'icon-chip', style: `--h: var(--${hue})` }, icon(x.id === 'opencode' ? 'braces' : 'bot')),
+        h('span', { class: 'txt' }, h('span', { class: 'lbl' }, name, x.running ? h('span', { class: 'tag amber', style: 'margin-left:6px' }, 'running') : null), val)
+      );
+    })
+  );
+
+  const notes = [];
+  if (sh.harnesses.find((x) => x.id === 'zcode')?.running) notes.push(h('div', { class: 'note warn' }, icon('alert'), h('span', null, 'Z-Code is running. Quit it (including the tray icon) before copying a provider to it, or Z-Code will undo the change when it exits.')));
+  const dirty = HARNESS_LIST.filter(([id]) => harnessDirty(id)).map(([, n]) => n);
+  if (dirty.length) notes.push(h('div', { class: 'note info' }, icon('info'), h('span', null, `This page reads the files on disk. Unsaved changes in ${dirty.join(' and ')} are not shown here.`)));
+
+  const cell = (p, id) => {
+    const inH = p.in[id];
+    const missing = p.models.filter((m) => !inH?.models.includes(m.id)).length;
+    const busy = S.copying === `${p.key}>${id}`;
+    if (inH && !missing) return h('span', { class: 'tag green', title: `In ${harnessName(id)} as "${inH.id}" with ${inH.models.length} models` }, icon('check'), inH.id);
+    const label = inH ? `+${missing}` : 'Copy';
+    return h(
+      'button',
+      { class: 'btn xs ' + (inH ? 'soft' : 'ghost'), disabled: busy || !!S.copying, title: inH ? `Add the ${missing} model${missing === 1 ? '' : 's'} ${harnessName(id)} doesn't have yet` : `Copy this provider and its ${p.models.length} models to ${harnessName(id)}`, onclick: (e) => { e.stopPropagation(); sharedCopy(p, id, null); } },
+      busy ? h('span', { class: 'spinner' }) : icon(inH ? 'plus' : 'download'),
+      label
+    );
+  };
+
+  const rows = [];
+  for (const p of sh.providers) {
+    const open = S.sopen === p.key;
+    rows.push(
+      h(
+        'tr',
+        { class: open ? 'editing' : '', style: 'cursor:pointer', onclick: () => { S.sopen = open ? null : p.key; render(); } },
+        h(
+          'td',
+          null,
+          h(
+            'div',
+            { class: 'mcell', style: 'flex-direction:row;align-items:center;gap:10px' },
+            avatar(p.key, p.name, 'sm'),
+            h('div', { style: 'min-width:0' }, h('div', { class: 'mid', style: 'font-family:var(--font)', title: p.name }, p.name, p.in.library ? h('span', { class: 'tag plain round' }, 'Library') : null), h('div', { class: 'msub', title: p.baseURL }, p.baseURL.replace(/^https?:\/\//, '')))
+          )
+        ),
+        h('td', { class: 'num' }, p.models.length),
+        h('td', null, p.keyKind === 'none' ? h('span', { class: 'tag off' }, 'No key') : h('span', { class: 'tag ' + (p.keyKind === 'literal' ? 'plain' : 'blue'), title: p.keyKind === 'literal' ? 'Plain key' : `Key read from ${p.keyKind}` }, icon('key'), p.keyKind === 'literal' ? 'key' : p.keyKind)),
+        HARNESS_LIST.map(([id]) => h('td', null, cell(p, id)))
+      )
+    );
+    if (open) rows.push(h('tr', { class: 'model-edit' }, h('td', { colspan: 3 + HARNESS_LIST.length }, sharedDetail(p))));
+  }
+
+  const table = sh.providers.length
+    ? h(
+        'div',
+        { class: 'card flush' },
+        h(
+          'div',
+          { class: 'tablewrap' },
+          h(
+            'table',
+            null,
+            h('thead', null, h('tr', null, h('th', null, 'Provider'), h('th', { class: 'num' }, 'Models'), h('th', null, 'Key'), HARNESS_LIST.map(([, n]) => h('th', null, n)))),
+            h('tbody', null, rows)
+          )
+        )
+      )
+    : h(
+        'div',
+        { class: 'card empty' },
+        h('span', { class: 'icon-chip' }, icon('layers')),
+        h('h2', null, 'No custom providers yet'),
+        h('p', null, 'Providers you add to OpenCode, Z-Code or Pi show up here automatically. You can also add one here and copy it to each harness.'),
+        h('button', { class: 'btn primary', onclick: () => startDiscovery(null, 'library') }, icon('download'), 'Add from endpoint')
+      );
+  return h('div', null, head, status, notes, table, sh.library?.error ? h('div', { class: 'error-box' }, icon('alert'), `Library file unreadable: ${sh.library.error}`) : null);
+}
+
+function sharedDetail(p) {
+  const sel = (S.ssel[p.key] = S.ssel[p.key] || new Set(p.models.map((m) => m.id)));
+  const picked = () => p.models.filter((m) => sel.has(m.id)).map((m) => m.id);
+  const yes = (on) => (on ? h('span', { class: 'tag green' }, icon('check')) : dash());
+  const caps = (m) => h('div', { class: 'caps' }, m.toolCall === false ? h('span', { class: 'tag off' }, 'No tools') : null, m.reasoning ? h('span', { class: 'tag violet' }, 'Reasoning') : null, m.vision ? h('span', { class: 'tag rose' }, 'Vision') : null, m.pdf ? h('span', { class: 'tag amber' }, 'PDF') : null);
+  return h(
+    'div',
+    { class: 'editor-panel' },
+    h(
+      'div',
+      { class: 'ep-section' },
+      h(
+        'div',
+        { class: 'btn-row', style: 'flex-wrap:wrap' },
+        h('span', { class: 'muted small' }, `${sel.size} of ${p.models.length} models selected. API: ${{ 'openai-chat': 'Chat completions', 'openai-responses': 'Responses', anthropic: 'Anthropic messages' }[p.api] || p.api}`),
+        h('span', { class: 'spacer' }),
+        HARNESS_LIST.map(([id, name]) => h('button', { class: 'btn sm', disabled: !sel.size || !!S.copying, onclick: () => sharedCopy(p, id, picked()) }, icon('download'), `Copy selected to ${name}`))
+      )
+    ),
+    p.models.length
+      ? h(
+          'div',
+          { class: 'tablewrap' },
+          h(
+            'table',
+            null,
+            h('thead', null, h('tr', null, h('th', { class: 'check-cell' }, h('input', { type: 'checkbox', checked: sel.size === p.models.length, 'aria-label': 'Select all', onchange: (e) => { p.models.forEach((m) => (e.target.checked ? sel.add(m.id) : sel.delete(m.id))); render(); } })), h('th', null, 'Model'), h('th', { class: 'num' }, 'Limits'), h('th', null, 'Capabilities'), HARNESS_LIST.map(([, n]) => h('th', null, n)))),
+            h(
+              'tbody',
+              null,
+              p.models.map((m) =>
+                h(
+                  'tr',
+                  null,
+                  h('td', { class: 'check-cell' }, h('input', { type: 'checkbox', checked: sel.has(m.id), 'aria-label': `Select ${m.id}`, onchange: (e) => { e.target.checked ? sel.add(m.id) : sel.delete(m.id); render(); } })),
+                  h('td', null, h('div', { class: 'mcell' }, h('div', { class: 'mid' }, m.id), m.name && m.name !== m.id ? h('div', { class: 'msub' }, m.name) : null)),
+                  h('td', { class: 'num' }, limitsCell({ context: m.context, output: m.output })),
+                  h('td', null, caps(m)),
+                  HARNESS_LIST.map(([id]) => h('td', null, yes(p.in[id]?.models.includes(m.id))))
+                )
+              )
+            )
+          )
+        )
+      : h('div', { class: 'empty-inline' }, 'No models yet.'),
+    h(
+      'div',
+      { class: 'ep-section btn-row' },
+      h('button', { class: 'btn sm soft', onclick: () => startDiscovery(p.key, 'library') }, icon('download'), 'Fetch models'),
+      h('span', { class: 'spacer' }),
+      p.in.library ? h('button', { class: 'btn sm ghost danger', onclick: () => sharedForget(p) }, icon('trash'), 'Remove from library') : h('button', { class: 'btn sm ghost', onclick: () => sharedSaveToLibrary(p), title: 'Keep a copy that survives removing it from every harness' }, icon('layers'), 'Save to library')
+    )
+  );
+}
+
+// ---------- Pi view ----------
+// Edits Pi's ~/.pi/agent/models.json: { providers: { name: { baseUrl, api, apiKey, models: [...] } } }.
+// Pi re-reads the file whenever /model is opened, so no restart is needed.
+
+const PI_LEVEL_LABEL = { 'openai-completions': 'Chat completions', 'openai-responses': 'Responses', 'anthropic-messages': 'Anthropic messages', 'google-generative-ai': 'Google' };
+const piDirty = () => !!(S.pi?.doc && JSON.stringify(S.pi.doc) !== S.pi.saved);
+function piProviders() {
+  if (!S.pi?.doc) return {};
+  if (!isObj(S.pi.doc.providers)) S.pi.doc.providers = {};
+  return S.pi.doc.providers;
+}
+const piTaken = (id) => !!piProviders()[id] || (S.pi?.reserved || []).includes(id);
+// Pi key syntax → the {env:…} form /api/discover and /api/test understand.
+function piKeyRef(v) {
+  if (!v) return '';
+  const env = v.match(/^\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))$/);
+  if (env) return `{env:${env[1] || env[2]}}`;
+  return v.startsWith('!') ? '' : v.replace(/\$\$/g, '$').replace(/\$!/g, '!');
+}
+
+async function loadPi() {
+  try {
+    const r = await api('GET', '/api/pi');
+    S.pi = { ...r, saved: r.doc ? JSON.stringify(r.doc) : '' };
+  } catch (e) {
+    S.pi = { error: e.message, doc: null };
+  }
+  if (S.psel && !piProviders()[S.psel]) S.psel = null;
+  document.getElementById('count-pi').textContent = Object.keys(piProviders()).length || '';
+  if (S.view === 'pi') render();
+}
+
+async function savePi() {
+  if (S.pi.hasComments && !confirm('models.json contains comments. Saving rewrites it as plain JSON, so the comments will be removed (a .bak backup is kept). Continue?')) return;
+  try {
+    const r = await api('POST', '/api/pi/save', { doc: S.pi.doc });
+    S.pi = { ...S.pi, ...r, saved: JSON.stringify(r.doc) };
+    render();
+    toast(r.backup ? `Saved. Backup: ${r.backup}` : 'Saved. Pi picks it up next time you open /model.');
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+function piChanged() {
+  document.getElementById('count-pi').textContent = Object.keys(piProviders()).length || '';
+  render();
+}
+
+function piModelFromSuggestion(m) {
+  const s = m.suggestion;
+  const out = { id: m.id };
+  if (s.name && s.name !== m.id) out.name = s.name;
+  if (s.reasoning) out.reasoning = true;
+  if (s.attachment || (s.modalities?.input || []).includes('image')) out.input = ['text', 'image'];
+  if (s.limit?.context) out.contextWindow = s.limit.context;
+  if (s.limit?.output) out.maxTokens = s.limit.output;
+  if (s.cost) out.cost = { input: s.cost.input, output: s.cost.output, cacheRead: s.cost.cache_read ?? 0, cacheWrite: s.cost.cache_write ?? 0 };
+  return out;
+}
+
+function piAddSelected() {
+  const d = S.discovery;
+  let pid = d.pid;
+  const ps = piProviders();
+  if (!pid) {
+    pid = zcSlug(d.newId);
+    if (piTaken(pid)) return toast(`"${pid}" already exists or is one of Pi's built-in providers. Pick another ID.`, 'error');
+    const key = d.apiKey.trim();
+    // Pi hides models of a provider without a key, so keyless endpoints get a placeholder.
+    const apiKey = d.keyMode === 'env' && d.envName ? '$' + d.envName : d.keyMode === 'literal' && key ? key.replace(/\$/g, '$$$$').replace(/^!/, '$!') : 'none';
+    ps[pid] = { name: d.newName || pid, baseUrl: d.baseURL, api: d.apiType, apiKey, models: [] };
+  }
+  const p = ps[pid];
+  p.models = Array.isArray(p.models) ? p.models : [];
+  let added = 0;
+  for (const m of d.result.models) {
+    if (!d.selected.has(m.id)) continue;
+    const i = p.models.findIndex((x) => x.id === m.id);
+    if (i >= 0 && !d.overwrite) continue;
+    if (i >= 0) p.models[i] = piModelFromSuggestion(m);
+    else p.models.push(piModelFromSuggestion(m));
+    added++;
+  }
+  S.discovery = null;
+  S.psel = pid;
+  S.pptab = 'models';
+  piChanged();
+  toast(`Added ${added} model${added === 1 ? '' : 's'} to ${pid}. Save to write the file.`);
+}
+
+function viewPi() {
+  const z = S.pi;
+  const dirty = piDirty();
+  const head = (actions) => h('div', { class: 'page-head' }, h('div', null, h('h1', null, 'Pi providers'), h('div', { class: 'sub' }, "Custom providers for the Pi coding agent. Pi reloads this file whenever you open /model.")), actions);
+  if (!z) return h('div', null, head(null), h('div', { class: 'card empty' }, 'Loading…'));
+  if (!z.doc) return h('div', null, head(null), h('div', { class: 'error-box' }, icon('alert'), h('span', null, `Could not read ${z.path || 'models.json'}: ${z.error}`)));
+  const ps = piProviders();
+  const ids = Object.keys(ps);
+  if (!S.discovery && (!S.psel || !ps[S.psel]) && ids.length) S.psel = ids[0];
+  const adding = !!(S.discovery && !S.discovery.pid);
+  const addBlank = () => {
+    const name = prompt('Provider ID (used in Pi as provider/model):', 'my-provider')?.trim();
+    if (!name) return;
+    const id = zcSlug(name);
+    if (piTaken(id)) return toast(`"${id}" already exists or is one of Pi's built-in providers.`, 'error');
+    ps[id] = { name, baseUrl: '', api: 'openai-completions', apiKey: 'none', models: [] };
+    S.psel = id;
+    S.pptab = 'connection';
+    S.discovery = null;
+    piChanged();
+  };
+
+  const list = h(
+    'div',
+    { class: 'card plist' },
+    h('div', { class: 'plist-head' }, h('h2', null, 'Pi providers'), h('span', { class: 'count' }, ids.length)),
+    ids.length ? null : h('div', { class: 'empty-inline' }, 'Nothing here yet.'),
+    ids.map((id) => {
+      const p = ps[id] || {};
+      const n = (p.models || []).length;
+      return h(
+        'button',
+        { class: 'pitem' + (S.psel === id && !S.discovery ? ' active' : ''), onclick: () => { S.psel = id; S.discovery = null; S.pedit = null; render(); } },
+        avatar(id, p.name || id),
+        h('span', { class: 'ptxt' }, h('span', { class: 'pname' }, p.name || id), h('span', { class: 'purl' }, (z.reserved.includes(id) ? 'Built-in override · ' : '') + (p.baseUrl || 'No base URL').replace(/^https?:\/\//, ''))),
+        h('span', { class: 'pn' }, n)
+      );
+    }),
+    adding ? h('button', { class: 'pitem active' }, h('span', { class: 'avatar', style: '--h: var(--accent)' }, icon('plus')), h('span', { class: 'ptxt' }, h('span', { class: 'pname' }, 'New provider'), h('span', { class: 'purl' }, S.discovery.baseURL.replace(/^https?:\/\//, '') || 'Connect an endpoint'))) : null,
+    h('div', { class: 'plist-add' }, h('button', { class: 'btn ghost sm', onclick: addBlank }, icon('plus'), 'Blank provider'))
+  );
+
+  let right;
+  if (S.discovery) right = viewDiscovery();
+  else if (S.psel && ps[S.psel]) right = viewPiProvider(S.psel);
+  else
+    right = h(
+      'div',
+      { class: 'card empty' },
+      h('span', { class: 'icon-chip' }, icon('link')),
+      h('h2', null, 'Add a custom provider to Pi'),
+      h('p', null, 'Paste an OpenAI-compatible base URL and pick models from its list, or copy one you already use elsewhere from Shared providers.'),
+      h('div', { class: 'btn-row', style: 'justify-content:center' }, h('button', { class: 'btn primary', onclick: () => startDiscovery(null, 'pi') }, icon('plus'), 'Add from endpoint'), h('button', { class: 'btn', onclick: () => go('shared') }, 'Shared providers'))
+    );
+
+  return h(
+    'div',
+    null,
+    head(
+      h(
+        'div',
+        { class: 'btn-row' },
+        h('button', { class: 'btn ghost', onclick: () => { if (!dirty || confirm('Discard unsaved Pi changes?')) loadPi(); } }, icon('refresh'), dirty ? 'Discard' : 'Reload'),
+        h('button', { class: 'btn', onclick: () => startDiscovery(null, 'pi'), disabled: adding }, icon('plus'), 'Add from endpoint'),
+        h('button', { class: 'btn primary', onclick: savePi, disabled: !dirty }, 'Save')
+      )
+    ),
+    h('div', { class: 'muted small', style: 'margin:-8px 0 14px' }, h('code', null, z.path), z.exists ? null : h('span', { class: 'tag plain', style: 'margin-left:8px' }, 'New file'), dirty ? h('span', { class: 'tag amber', style: 'margin-left:8px' }, 'Unsaved') : null),
+    h('div', { class: 'split' }, list, right)
+  );
+}
+
+function viewPiProvider(pid) {
+  const p = piProviders()[pid];
+  const models = (p.models = Array.isArray(p.models) ? p.models : []);
+  const set = (fn) => { fn(); piChanged(); };
+  const setKey = (k, v) => set(() => (v === undefined || v === '' ? delete p[k] : (p[k] = v)));
+  const tab = (id, label, count) => h('button', { class: 'tab' + (S.pptab === id ? ' on' : ''), role: 'tab', 'aria-selected': String(S.pptab === id), onclick: () => { S.pptab = id; render(); } }, label, count !== undefined ? h('span', { class: 'tcount' }, count) : null);
+  const remove = () => {
+    if (!confirm(`Delete provider "${pid}" and its ${models.length} models from Pi's models.json?`)) return;
+    delete piProviders()[pid];
+    S.psel = null;
+    piChanged();
+  };
+  const addById = () => {
+    const id = prompt('Model ID exactly as the endpoint expects it:')?.trim();
+    if (!id) return;
+    if (models.some((m) => m.id === id)) return toast('That model is already added', 'error');
+    models.push({ id });
+    S.pedit = id;
+    S.pptab = 'models';
+    piChanged();
+  };
+  const hero = h(
+    'div',
+    { class: 'phero' },
+    h(
+      'div',
+      { class: 'phero-top' },
+      avatar(pid, p.name || pid, 'lg'),
+      h(
+        'div',
+        { class: 'phero-title' },
+        h('h2', null, p.name || pid, h('span', { class: 'tag mono plain' }, pid)),
+        h('div', { class: 'phero-meta' }, p.baseUrl ? h('span', { class: 'url', title: p.baseUrl }, p.baseUrl) : h('span', { class: 'tag amber' }, 'No base URL'), p.api ? h('span', { class: 'tag blue' }, PI_LEVEL_LABEL[p.api] || p.api) : null, p.apiKey && p.apiKey !== 'none' ? h('span', { class: 'tag green' }, icon('key'), /^\$/.test(p.apiKey) ? 'env key' : p.apiKey.startsWith('!') ? 'command' : 'key set') : null)
+      ),
+      h('div', { class: 'btn-row' }, h('button', { class: 'btn sm', onclick: () => startDiscovery(pid, 'pi'), disabled: !p.baseUrl }, icon('download'), 'Fetch models'), h('button', { class: 'btn sm icon ghost danger', onclick: remove, title: 'Delete provider', 'aria-label': 'Delete provider' }, icon('trash')))
+    ),
+    h('div', { class: 'tabs', role: 'tablist' }, tab('models', 'Models', models.length), tab('connection', 'Connection'), tab('json', 'JSON'))
+  );
+  let panel;
+  if (S.pptab === 'connection') {
+    const headers = p.headers || {};
+    panel = h(
+      'div',
+      { class: 'card-body tabpanel' },
+      h(
+        'div',
+        { class: 'grid two' },
+        field('Base URL', textInput(p.baseUrl, (v) => setKey('baseUrl', v.trim()), { placeholder: 'https://api.together.xyz/v1', class: 'mono-input' }), 'The API root, usually ending in /v1'),
+        field('API key', apiKeyInput(p.apiKey, (v) => setKey('apiKey', v.trim())), 'A key, $ENV_VAR, or !command. Pi needs some value even for keyless servers.'),
+        field('Display name', textInput(p.name, (v) => setKey('name', v.trim())), 'Shown in Pi\'s /model list'),
+        field('API format', apiSelect('pi', p.api || 'openai-completions', (v) => setKey('api', v)), 'Chat completions fits most OpenAI-compatible endpoints')
+      ),
+      h('div', { class: 'ep-title', style: 'margin-top:28px' }, 'Custom headers', h('span', { class: 'count', style: 'font-size:13px' }, Object.keys(headers).length || '')),
+      Object.entries(headers).map(([k, v]) =>
+        h(
+          'div',
+          { class: 'kv' },
+          textInput(k, (nk) => setKey('headers', renameKey(headers, k, nk.trim())), { class: 'mono-input', 'aria-label': 'Header name' }),
+          textInput(v, (nv) => setKey('headers', { ...headers, [k]: nv }), { 'aria-label': `${k} value` }),
+          h('button', { class: 'btn icon ghost danger', title: `Remove ${k}`, 'aria-label': `Remove ${k}`, onclick: () => { const rest = { ...headers }; delete rest[k]; setKey('headers', Object.keys(rest).length ? rest : undefined); } }, icon('x'))
+        )
+      ),
+      h('button', { class: 'btn sm soft', onclick: () => setKey('headers', { ...headers, ['X-Header-' + (Object.keys(headers).length + 1)]: '' }) }, icon('plus'), 'Add header')
+    );
+  } else if (S.pptab === 'json') {
+    panel = h(
+      'div',
+      { class: 'card-body tabpanel' },
+      h('div', { class: 'note info', style: 'margin-bottom:16px' }, icon('info'), h('span', null, 'The raw provider object (compat, modelOverrides, thinkingLevelMap…). Apply updates the page; Save writes the file.')),
+      jsonEditor(p, (v) => {
+        if (!isObj(v)) throw new Error('Provider must be an object');
+        piProviders()[pid] = v;
+        piChanged();
+      }, 18)
+    );
+  } else {
+    const rows = [];
+    for (const m of models) {
+      const editing = S.pedit === m.id;
+      const ref = `pi:${pid}/${m.id}`;
+      const test = S.tests[ref];
+      rows.push(
+        h(
+          'tr',
+          { class: editing ? 'editing' : '' },
+          h('td', null, h('div', { class: 'mcell' }, h('div', { class: 'mid', title: m.id }, m.id), m.name ? h('div', { class: 'msub' }, m.name) : null)),
+          h('td', { class: 'num' }, limitsCell({ context: m.contextWindow, output: m.maxTokens })),
+          h('td', null, h('div', { class: 'caps' }, m.reasoning ? h('span', { class: 'tag violet' }, 'Reasoning') : null, (m.input || []).includes('image') ? h('span', { class: 'tag rose' }, 'Vision') : null)),
+          h('td', { class: 'num' }, costCell(m.cost)),
+          h(
+            'td',
+            { class: 'actions' },
+            h(
+              'div',
+              { class: 'row-actions' },
+              h('button', { class: 'btn sm icon ghost', disabled: !p.baseUrl, title: 'Send a tiny test request', 'aria-label': `Test ${m.id}`, onclick: () => piRunTest(pid, m.id) }, test?.loading ? h('span', { class: 'spinner' }) : icon('play')),
+              h('button', { class: 'btn sm icon ' + (editing ? 'soft' : 'ghost'), onclick: () => { S.pedit = editing ? null : m.id; render(); }, title: editing ? 'Close editor' : 'Edit model', 'aria-label': editing ? 'Close editor' : `Edit ${m.id}` }, icon(editing ? 'x' : 'edit')),
+              h('button', { class: 'btn sm icon ghost danger', title: `Remove ${m.id}`, 'aria-label': `Remove ${m.id}`, onclick: () => { p.models = models.filter((x) => x !== m); piChanged(); } }, icon('trash'))
+            )
+          )
+        )
+      );
+      if (test && !test.loading) rows.push(h('tr', { class: 'result-row' }, h('td', { colspan: 5 }, test.ok ? h('div', { class: 'ok-box' }, icon('check'), `Replied in ${test.ms} ms: "${test.reply}"`) : h('div', { class: 'error-box' }, icon('alert'), `Failed ${test.status || ''} ${test.error}`))));
+      if (editing) rows.push(h('tr', { class: 'model-edit' }, h('td', { colspan: 5 }, piModelEditor(pid, m))));
+    }
+    panel = h(
+      'div',
+      { class: 'tabpanel' },
+      models.length
+        ? [
+            h('div', { class: 'toolbar' }, h('span', { class: 'muted small' }, `${models.length} model${models.length === 1 ? '' : 's'}`), h('span', { class: 'spacer' }), h('button', { class: 'btn sm ghost', onclick: addById }, icon('plus'), 'Add by ID'), h('button', { class: 'btn sm soft', onclick: () => startDiscovery(pid, 'pi'), disabled: !p.baseUrl }, icon('download'), 'Fetch more')),
+            h('div', { class: 'tablewrap' }, h('table', null, h('thead', null, h('tr', null, h('th', null, 'Model'), h('th', { class: 'num' }, 'Limits'), h('th', null, 'Capabilities'), h('th', { class: 'num' }, 'Price per 1M'), h('th', null))), h('tbody', null, rows))),
+          ]
+        : h(
+            'div',
+            { class: 'empty' },
+            h('span', { class: 'icon-chip', style: '--h: var(--violet)' }, icon('layers')),
+            h('h2', null, 'No models yet'),
+            h('p', null, p.baseUrl ? 'Fetch the list this endpoint serves and pick the ones you want, or add a model by its ID.' : 'Set a base URL on the Connection tab first, then fetch its models.'),
+            h('div', { class: 'btn-row', style: 'justify-content:center' }, h('button', { class: 'btn primary', onclick: () => (p.baseUrl ? startDiscovery(pid, 'pi') : ((S.pptab = 'connection'), render())) }, icon(p.baseUrl ? 'download' : 'link'), p.baseUrl ? 'Fetch models' : 'Set base URL'), h('button', { class: 'btn', onclick: addById }, 'Add by ID'))
+          )
+    );
+  }
+  return h('div', { class: 'card flush' }, hero, panel);
+}
+
+async function piRunTest(pid, mid) {
+  const p = piProviders()[pid];
+  if ((p.api || 'openai-completions') !== 'openai-completions') toast('Test uses the OpenAI-style /chat/completions call; it may not work for this API format.');
+  const ref = `pi:${pid}/${mid}`;
+  S.tests[ref] = { loading: true };
+  render();
+  try {
+    S.tests[ref] = await api('POST', '/api/test', { baseURL: p.baseUrl, apiKey: piKeyRef(p.apiKey === 'none' ? '' : p.apiKey), headers: p.headers, model: mid });
+  } catch (e) {
+    S.tests[ref] = { ok: false, error: e.message };
+  }
+  render();
+}
+
+function piModelEditor(pid, m) {
+  const setR = (fn) => { fn(); piChanged(); };
+  const setNum = (k, v) => setR(() => (v === undefined ? delete m[k] : (m[k] = v)));
+  const vision = (m.input || []).includes('image');
+  const setCost = (k, v) =>
+    setR(() => {
+      const c = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, ...m.cost, [k]: v ?? 0 };
+      // Pi wants all four rates or no cost at all.
+      if (Object.values(c).every((x) => !x)) delete m.cost;
+      else m.cost = c;
+    });
+  return h(
+    'div',
+    { class: 'editor-panel' },
+    h(
+      'div',
+      { class: 'ep-section' },
+      h('div', { class: 'ep-title' }, 'General'),
+      h(
+        'div',
+        { class: 'grid four' },
+        field('Display name', textInput(m.name, (v) => setR(() => (v.trim() ? (m.name = v.trim()) : delete m.name)))),
+        field('Context window', numInput(m.contextWindow, (v) => setNum('contextWindow', v), { placeholder: '128000', min: 1 })),
+        field('Max output', numInput(m.maxTokens, (v) => setNum('maxTokens', v), { placeholder: '16384', min: 1 }))
+      ),
+      h(
+        'div',
+        { class: 'btn-row', style: 'gap:8px 20px;margin-top:12px' },
+        h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: !!m.reasoning, onchange: (e) => setR(() => (e.target.checked ? (m.reasoning = true) : delete m.reasoning)) }), 'Reasoning'),
+        h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: vision, onchange: (e) => setR(() => (e.target.checked ? (m.input = ['text', 'image']) : delete m.input)) }), 'Image input')
+      )
+    ),
+    h(
+      'div',
+      { class: 'ep-section' },
+      h('div', { class: 'ep-title' }, 'Price per 1M tokens (USD)'),
+      h(
+        'div',
+        { class: 'grid four' },
+        field('Input', numInput(m.cost?.input, (v) => setCost('input', v), { step: 'any', placeholder: '0.00' })),
+        field('Output', numInput(m.cost?.output, (v) => setCost('output', v), { step: 'any', placeholder: '0.00' })),
+        field('Cache read', numInput(m.cost?.cacheRead, (v) => setCost('cacheRead', v), { step: 'any', placeholder: '0.00' })),
+        field('Cache write', numInput(m.cost?.cacheWrite, (v) => setCost('cacheWrite', v), { step: 'any', placeholder: '0.00' }))
+      )
+    ),
+    h(
+      'div',
+      { class: 'ep-section' },
+      h(
+        'details',
+        { class: 'adv' },
+        h('summary', null, 'Model JSON (compat, thinkingLevelMap, headers)'),
+        h(
+          'div',
+          { class: 'body' },
+          jsonEditor(m, (v) => {
+            if (!isObj(v) || !v.id) throw new Error('A model needs an id');
+            const list = piProviders()[pid].models;
+            list[list.indexOf(m)] = v;
+            S.pedit = v.id;
+            piChanged();
+          }, 12)
+        )
+      )
+    )
+  );
+}
+
 // ---------- raw view ----------
 
 function viewRaw() {
@@ -1619,21 +2845,29 @@ function viewRaw() {
 // ---------- wiring ----------
 
 // Each page has its own hash route, so it can be linked and Back works.
-const VIEWS = ['providers', 'defaults', 'settings', 'files', 'raw'];
-const viewFromHash = () => (VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'providers');
+const VIEWS = ['shared', ...Object.keys(VIEW_HARNESS)];
+const viewFromHash = () => (VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'shared');
 S.view = viewFromHash();
+S.harness = VIEW_HARNESS[S.view] || 'opencode';
+// The shared page reads the files on disk, so refresh it whenever it's opened.
+const enterView = (view) => {
+  if (view === 'shared' && S.shared) loadShared();
+};
 window.addEventListener('hashchange', () => {
   if (viewFromHash() === S.view) return;
   S.view = viewFromHash();
+  enterView(S.view);
   render();
 });
 document.querySelectorAll('.nav').forEach((n) =>
   n.addEventListener('click', () => {
     if (location.hash.slice(1) !== n.dataset.view) location.hash = n.dataset.view;
     S.view = n.dataset.view;
+    enterView(S.view);
     render();
   })
 );
+document.querySelectorAll('#harness-switch button').forEach((b) => b.addEventListener('click', () => go(HARNESS_HOME[b.dataset.harness])));
 document.getElementById('save').addEventListener('click', save);
 const reloadFromDisk = () => {
   if (isDirty() && !confirm('Discard unsaved changes?')) return;
@@ -1661,11 +2895,13 @@ document.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key === 's') {
     e.preventDefault();
     if (S.view === 'files' && S.doc && (docDirty() || !S.doc.exists)) saveDoc();
+    else if (S.view === 'zcode' && zcDirty()) saveZc();
+    else if (S.view === 'pi' && piDirty()) savePi();
     else if (isDirty()) save();
   }
 });
 window.addEventListener('beforeunload', (e) => {
-  if (isDirty() || docDirty()) {
+  if (isDirty() || docDirty() || zcDirty() || piDirty()) {
     e.preventDefault();
     e.returnValue = '';
   }

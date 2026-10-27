@@ -61,16 +61,17 @@ function readConfig(file) {
   return { path: file, exists: true, raw, config, error, hasComments: hasComments(raw) };
 }
 
-function writeConfig(file, config) {
+function writeConfig(file, config, { mode } = {}) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   let backup = null;
   if (fs.existsSync(file)) {
     backup = file + '.bak';
     fs.copyFileSync(file, backup);
+    if (mode) fs.chmodSync(backup, mode);
   }
   const text = JSON.stringify(config, null, 2) + '\n';
   const tmp = file + '.tmp-' + process.pid;
-  fs.writeFileSync(tmp, text, 'utf8');
+  fs.writeFileSync(tmp, text, { encoding: 'utf8', mode });
   fs.renameSync(tmp, file);
   return { backup };
 }

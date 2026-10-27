@@ -598,3 +598,14 @@ details.sf details.sf { box-shadow: none; background: var(--surface-2); }
   .kv { grid-template-columns: 1fr 1fr auto; }
   .editor { min-height: 48vh; }
 }
+
+/* Harness switcher in the sidebar */
+[hidden] { display: none !important; }
+.harness-switch { display: flex; margin: 0 2px 8px; }
+.harness-switch button { flex: 1; padding: 0 6px; }
+.nav-group { display: flex; flex-direction: column; gap: 2px; }
+@media (max-width: 900px) {
+  .harness-switch { flex: none; margin: 0; align-self: center; }
+  .harness-switch button { flex: none; padding: 0 10px; }
+  .nav-group { flex-direction: row; gap: 4px; flex: none; }
+}

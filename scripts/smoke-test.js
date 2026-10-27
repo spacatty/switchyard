@@ -21,7 +21,9 @@ async function main() {
   fs.writeFileSync(file, JSON.stringify({ $schema: 'https://opencode.ai/config.json', theme: 'x' }));
 
   process.env.XDG_CONFIG_HOME = path.join(dir, 'xdg');
-  const { server, token } = createServer({ configPath: file, cwd: dir });
+  const zfile = path.join(dir, 'zcode', 'provider_config.json');
+  const pfile = path.join(dir, 'pi', 'models.json');
+  const { server, token } = createServer({ configPath: file, zcodePath: zfile, piPath: pfile, libraryPath: path.join(dir, 'lib', 'providers.json'), cwd: dir });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const base = `http://localhost:${server.address().port}`;
   const call = async (method, p, body) => {
@@ -62,6 +64,57 @@ async function main() {
     assert.strictEqual((await call('POST', '/api/file/create', { group: 'global-agents', name: '../x' })).status, 400, 'no path tricks');
     await call('POST', '/api/file/delete', { path: created.json.path });
     assert.ok(fs.existsSync(created.json.path + '.bak') && !fs.existsSync(created.json.path), 'delete keeps a .bak');
+
+    // Z-Code provider_config.json (path redirected to the temp folder).
+    const zs = await call('GET', '/api/zcode');
+    assert.strictEqual(zs.status, 200);
+    assert.strictEqual(zs.json.path, zfile);
+    assert.strictEqual(zs.json.exists, false);
+    const zdoc = zs.json.doc;
+    zdoc.config.providerConfigRules.providerRules.push({
+      providerId: 'openrouter-custom',
+      providerName: 'OpenRouter',
+      config: { group: 'standard-personal', access: { type: 'api-key', apiKey: null }, api: { type: 'openai-chat-completions', baseUrl: d.json.baseURL }, personalModelIds: [m.id], modelOrder: [m.id] },
+    });
+    const zmodel = {
+      providerId: 'openrouter-custom',
+      modelId: m.id,
+      config: {
+        enabled: true,
+        properties: { contextWindow: m.suggestion.limit.context, supportsJsonSchemaOutput: false, supportsNativeWebSearch: false, supportsMidConversationSystem: false, inputFormat: { supportsImage: false, supportsVideo: false, supportsPdf: false } },
+        optionSpecs: { reasoningLevel: { values: ['disabled'], map: '{}' }, maxOutputTokens: { max: m.suggestion.limit.output } },
+      },
+    };
+    zdoc.config.modelConfigRules.manualProviderModelRules.push(zmodel);
+    const zsv = await call('POST', '/api/zcode/save', { doc: zdoc });
+    assert.strictEqual(zsv.status, 200, JSON.stringify(zsv.json));
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(zfile, 'utf8')), zdoc);
+    const bad = JSON.parse(JSON.stringify(zdoc));
+    bad.config.modelConfigRules.manualProviderModelRules[0].config.optionSpecs.reasoningLevel.values = [];
+    assert.strictEqual((await call('POST', '/api/zcode/save', { doc: bad })).status, 400, 'invalid Z-Code config is refused');
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(zfile, 'utf8')), zdoc, 'refused save leaves the file alone');
+    assert.strictEqual((await call('POST', '/api/zcode/save', { doc: zdoc })).status, 200);
+    assert.ok(fs.existsSync(zfile + '.bak'), 'Z-Code backup created');
+
+    // Shared providers: the OpenRouter provider above is in OpenCode and Z-Code; copy it to Pi.
+    const sh = await call('GET', '/api/shared');
+    assert.strictEqual(sh.status, 200);
+    const orp = sh.json.providers.find((p) => p.in.opencode && p.in.zcode);
+    assert.ok(orp, 'OpenCode and Z-Code entries for the same endpoint are merged');
+    const cp = await call('POST', '/api/shared/copy', { key: orp.key, to: 'pi' });
+    assert.strictEqual(cp.status, 200, JSON.stringify(cp.json));
+    const piDoc = JSON.parse(fs.readFileSync(pfile, 'utf8'));
+    const piProv = piDoc.providers[cp.json.result.id];
+    assert.ok(piProv && piProv.baseUrl && piProv.api === 'openai-completions' && piProv.apiKey, 'Pi provider written with the fields Pi requires');
+    assert.ok(piProv.models.some((x) => x.id === m.id && x.contextWindow === m.suggestion.limit.context));
+    const again = await call('POST', '/api/shared/copy', { key: orp.key, to: 'pi' });
+    assert.strictEqual(again.json.result.added, 0, 'copying twice adds nothing');
+    assert.strictEqual((await call('POST', '/api/pi/save', { doc: { providers: { x: { baseUrl: 'http://y', models: [{ id: 'a' }] } } } })).status, 400, 'invalid Pi config is refused');
+    // Library: save by hand, then it shows up and can be removed.
+    const lib = await call('POST', '/api/shared/library/save', { provider: { name: 'Local', baseURL: 'http://localhost:11434/v1', models: [{ id: 'llama3' }] } });
+    assert.ok(lib.json.providers.some((p) => p.in.library && p.models[0]?.id === 'llama3'));
+    const rm = await call('POST', '/api/shared/library/remove', { key: 'http://localhost:11434/v1' });
+    assert.ok(!rm.json.providers.some((p) => p.in.library));
 
     const schema = await call('GET', '/api/schema');
     assert.ok(schema.json.schema?.properties, 'schema available');
