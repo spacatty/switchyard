@@ -601,11 +601,20 @@ details.sf details.sf { box-shadow: none; background: var(--surface-2); }
 
 /* Harness switcher in the sidebar */
 [hidden] { display: none !important; }
-.harness-switch { display: flex; margin: 0 2px 8px; }
-.harness-switch button { flex: 1; padding: 0 6px; }
+.harness-picker {
+  position: relative; display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 10px 0 12px; margin-bottom: 6px;
+  border-radius: var(--r-ctl); background: var(--surface-2); border: 1px solid var(--line); transition: border-color 0.15s, background 0.15s;
+}
+.harness-picker:hover { border-color: var(--line-strong); background: var(--surface); }
+.harness-picker:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
+.hp-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--h, var(--accent)); }
+.hp-name { flex: 1; min-width: 0; font-size: 14px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hp-chev { flex: none; display: inline-flex; color: var(--text-3); }
+.hp-select { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
+.hp-select option { background: var(--surface); color: var(--text); }
 .nav-group { display: flex; flex-direction: column; gap: 2px; }
 @media (max-width: 900px) {
-  .harness-switch { flex: none; margin: 0; align-self: center; }
-  .harness-switch button { flex: none; padding: 0 10px; }
+  .harness-picker { flex: none; width: 132px; height: 36px; margin: 0; align-self: center; }
+  .hp-name { font-size: 13px; }
   .nav-group { flex-direction: row; gap: 4px; flex: none; }
 }

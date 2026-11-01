@@ -1,7 +1,7 @@
 'use strict';
 
 // The shared provider list: every custom provider found in a supported harness
-// (OpenCode, Z-Code, Pi) plus the ones kept in Switchyard's own library file,
+// (OpenCode, Z-Code, Pi, T3 Code) plus the ones kept in Switchyard's own library file,
 // merged by base URL. Each harness format is translated to and from one neutral
 // shape so a provider can be copied into any other harness.
 //
@@ -17,11 +17,13 @@ const { writeConfig } = require('./config');
 const { resolveValue } = require('./discover');
 const { zcodeModelRule, RESERVED_IDS: ZCODE_RESERVED } = require('./zcode');
 const { BUILTIN_IDS: PI_BUILTIN } = require('./pi');
+const t3 = require('./t3');
 
 const HARNESSES = [
   { id: 'opencode', name: 'OpenCode' },
   { id: 'zcode', name: 'Z-Code' },
   { id: 'pi', name: 'Pi' },
+  { id: 't3', name: 'T3 Code' },
 ];
 
 function libraryPath() {
@@ -57,6 +59,13 @@ function urlKey(url) {
     .replace(/\/(chat\/completions|completions|responses|messages|models)$/i, '')
     .replace(/\/+$/, '')
     .toLowerCase();
+}
+
+// The merge key. Anthropic-style endpoints are written with or without /v1 depending
+// on the harness, and both spellings are the same server.
+function providerKey(p) {
+  const key = urlKey(p.baseURL);
+  return p.api === 'anthropic' ? key.replace(/\/v1$/, '') : key;
 }
 
 function uniqueId(seed, taken) {
@@ -96,11 +105,12 @@ function convertKey(key, harness) {
     }
     return { value: key.replace(/\$/g, '$$$$').replace(/^!/, '$!') };
   }
-  // Z-Code only takes a literal key.
-  if (cmd) return { value: undefined, note: 'Z-Code needs the key itself; paste it on the Connection tab' };
+  // Z-Code and T3 Code only take a literal key.
+  const name = harness === 't3' ? 'T3 Code' : 'Z-Code';
+  if (cmd) return { value: undefined, note: `${name} needs the key itself; paste it on the Connection tab` };
   if (env || file) {
     const v = resolved();
-    return v ? { value: v, note: `key resolved from ${env ? '$' + env[1].trim() : file[1].trim()} and stored as plain text (Z-Code has no variable lookup)` } : { value: undefined, note: `${env ? '$' + env[1].trim() : file[1].trim()} is not set, so no key was copied` };
+    return v ? { value: v, note: `key resolved from ${env ? '$' + env[1].trim() : file[1].trim()} and stored as plain text (${name} has no variable lookup)` } : { value: undefined, note: `${env ? '$' + env[1].trim() : file[1].trim()} is not set, so no key was copied` };
   }
   return { value: key };
 }
@@ -208,14 +218,37 @@ function fromPi(doc) {
   return out;
 }
 
+// Only claudeAgent instances pointed at an endpoint count; T3's stock instances are skipped.
+function fromT3(doc) {
+  const out = [];
+  for (const [id, inst] of Object.entries(isObj(doc?.providerInstances) ? doc.providerInstances : {})) {
+    if (!isObj(inst) || inst.driver !== t3.DRIVER) continue;
+    const baseURL = t3.envVar(inst, t3.BASE_VAR)?.value;
+    if (!baseURL) continue;
+    // A key T3 keeps in its secret store can't be read from here, so it stays out of the list.
+    const key = t3.envVar(inst, t3.TOKEN_VAR)?.value || t3.envVar(inst, t3.KEY_VAR)?.value;
+    const models = Array.isArray(inst.config?.customModels) ? inst.config.customModels : [];
+    out.push({
+      id,
+      name: inst.displayName || id,
+      baseURL,
+      api: 'anthropic',
+      apiKey: key && key !== 'none' ? key : undefined,
+      headers: t3.headersFromEnv(t3.envVar(inst, t3.HEADERS_VAR)?.value),
+      models: models.map((m) => (typeof m === 'string' ? { id: m } : def({ id: m?.slug, name: m?.name }))).filter((m) => m.id),
+    });
+  }
+  return out;
+}
+
 // ---------- merged list ----------
 
-// sources: { library, opencode, zcode, pi } → their parsed provider lists.
+// sources: { library, opencode, zcode, pi, t3 } → their parsed provider lists.
 function buildShared(sources) {
   const byKey = new Map();
-  for (const src of ['library', 'opencode', 'pi', 'zcode']) {
+  for (const src of ['library', 'opencode', 'pi', 'zcode', 't3']) {
     for (const p of sources[src] || []) {
-      const key = urlKey(p.baseURL);
+      const key = providerKey(p);
       if (!key) continue;
       let e = byKey.get(key);
       if (!e) {
@@ -268,6 +301,7 @@ function piModel(m) {
 // existing provider for the same endpoint, adds only models it doesn't have yet, and
 // never overwrites a key or headers the harness already has.
 function applyTo(harness, doc, entry, modelIds) {
+  if (harness === 't3' && entry.api !== 'anthropic') throw new Error('T3 Code can only use custom endpoints that speak the Anthropic API, through Claude Code. Copy this one to OpenCode or Pi and turn that provider on in T3 Code.');
   const models = entry.models.filter((m) => !modelIds || modelIds.includes(m.id));
   const notes = [];
   const key = convertKey(entry.apiKey, harness);
@@ -280,7 +314,9 @@ function applyTo(harness, doc, entry, modelIds) {
     id = entry.in.opencode?.id || Object.keys(doc.provider).find((k) => urlKey(doc.provider[k]?.options?.baseURL) === entry.key);
     if (!id) {
       id = uniqueId(entry.name, (x) => !!doc.provider[x]);
-      doc.provider[id] = { npm: TO_OPENCODE[entry.api], name: entry.name, options: def({ baseURL: entry.baseURL, apiKey: key.value, headers: entry.headers }), models: {} };
+      // @ai-sdk/anthropic appends only /messages, so its base URL includes /v1.
+      const baseURL = entry.api === 'anthropic' ? `${t3.anthropicRoot(entry.baseURL)}/v1` : entry.baseURL;
+      doc.provider[id] = { npm: TO_OPENCODE[entry.api], name: entry.name, options: def({ baseURL, apiKey: key.value, headers: entry.headers }), models: {} };
     }
     const p = doc.provider[id];
     p.options = p.options || {};
@@ -334,10 +370,31 @@ function applyTo(harness, doc, entry, modelIds) {
       p.models.push(piModel(m));
       added++;
     }
+  } else if (harness === 't3') {
+    doc.providerInstances = isObj(doc.providerInstances) ? doc.providerInstances : {};
+    const list = doc.providerInstances;
+    id = entry.in.t3?.id;
+    if (!id) {
+      // Instance IDs must start with a letter, and the stock instances keep their names.
+      const seed = /^[a-z]/.test(slug(entry.name)) ? entry.name : `provider-${entry.name}`;
+      id = uniqueId(seed.slice(0, 56), (x) => !!list[x] || t3.RESERVED_IDS.includes(x));
+      if (!key.value) notes.push('no key to copy, so a placeholder "none" was set; add the real key on the Connection tab if this endpoint needs one');
+      list[id] = t3.t3Instance({ name: entry.name, baseURL: entry.baseURL, apiKey: key.value, headers: entry.headers });
+    }
+    const inst = list[id];
+    const token = t3.envVar(inst, t3.TOKEN_VAR);
+    if (key.value && token && !t3.hasStoredKey(token) && (!token.value || token.value === 'none')) token.value = key.value;
+    inst.config = isObj(inst.config) ? inst.config : {};
+    const custom = (inst.config.customModels = Array.isArray(inst.config.customModels) ? inst.config.customModels : []);
+    for (const m of models) {
+      if (custom.some((x) => (typeof x === 'string' ? x : x?.slug) === m.id)) continue;
+      custom.push(t3.customModel(m.id, m.name));
+      added++;
+    }
   } else {
     throw new Error(`Unknown harness "${harness}"`);
   }
   return { id, added, notes };
 }
 
-module.exports = { HARNESSES, libraryPath, readLibrary, writeLibrary, urlKey, fromOpenCode, fromZcode, fromPi, buildShared, applyTo, convertKey, keyFromPi };
+module.exports = { HARNESSES, libraryPath, readLibrary, writeLibrary, urlKey, providerKey, fromOpenCode, fromZcode, fromPi, fromT3, buildShared, applyTo, convertKey, keyFromPi };

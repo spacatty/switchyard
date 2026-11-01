@@ -210,6 +210,9 @@ const S = {
   psel: null,
   pptab: 'models',
   pedit: null,
+  t3: null, // T3 Code: { path, exists, doc, error, reserved, saved }
+  tsel: null,
+  ttab: 'models',
 };
 
 const isDirty = () => S.cfg && JSON.stringify(S.cfg) !== S.savedText;
@@ -244,6 +247,7 @@ async function load() {
   if (S.files) loadFiles();
   loadZc();
   loadPi();
+  loadT3();
   loadShared();
   try {
     applyState(await api('GET', '/api/state'));
@@ -327,31 +331,30 @@ function go(view) {
 }
 
 // Which harness each page belongs to; the shared page belongs to none.
-const VIEW_HARNESS = { providers: 'opencode', defaults: 'opencode', settings: 'opencode', files: 'opencode', raw: 'opencode', zcode: 'zcode', pi: 'pi' };
-const HARNESS_HOME = { opencode: 'providers', zcode: 'zcode', pi: 'pi' };
+const VIEW_HARNESS = { providers: 'opencode', defaults: 'opencode', settings: 'opencode', files: 'opencode', raw: 'opencode', zcode: 'zcode', pi: 'pi', t3: 't3' };
+const HARNESS_HOME = { opencode: 'providers', zcode: 'zcode', pi: 'pi', t3: 't3' };
 
 function renderChrome() {
   if (VIEW_HARNESS[S.view]) S.harness = VIEW_HARNESS[S.view];
   document.querySelectorAll('.nav').forEach((n) => n.classList.toggle('active', n.dataset.view === S.view));
-  document.querySelectorAll('#harness-switch button').forEach((b) => {
-    const on = b.dataset.harness === S.harness;
-    b.classList.toggle('on', on);
-    b.setAttribute('aria-pressed', String(on));
-  });
+  const [, harness, hue] = HARNESS_LIST.find(([id]) => id === S.harness);
+  document.getElementById('harness-select').value = S.harness;
+  document.getElementById('harness-name').textContent = harness;
+  document.getElementById('harness-dot').style.setProperty('--h', `var(--${hue})`);
   document.querySelectorAll('[data-harness-group]').forEach((g) => (g.hidden = g.dataset.harnessGroup !== S.harness));
 }
 
 function render() {
   renderChrome();
   const main = document.getElementById('main');
-  if (S.discovery && S.discovery.target !== { providers: 'opencode', zcode: 'zcode', pi: 'pi', shared: 'library' }[S.view]) S.discovery = null;
+  if (S.discovery && S.discovery.target !== { providers: 'opencode', zcode: 'zcode', pi: 'pi', t3: 't3', shared: 'library' }[S.view]) S.discovery = null;
   if (!S.cfg && VIEW_HARNESS[S.view] === 'opencode' && S.view !== 'files') {
     main.replaceChildren(h('div', { class: 'empty' }, S.file?.error ? 'This file could not be parsed.' : 'Loading…'));
     return;
   }
   const scroller = document.getElementById('sheet');
   const scroll = scroller.scrollTop;
-  const view = { providers: viewProviders, defaults: viewDefaults, settings: viewSettings, files: viewFiles, zcode: viewZcode, pi: viewPi, shared: viewShared, raw: viewRaw }[S.view]();
+  const view = { providers: viewProviders, defaults: viewDefaults, settings: viewSettings, files: viewFiles, zcode: viewZcode, pi: viewPi, t3: viewT3, shared: viewShared, raw: viewRaw }[S.view]();
   if (S.lastView !== S.view) view.classList.add('fade-in');
   main.replaceChildren(view);
   scroller.scrollTop = S.lastView === S.view ? scroll : 0;
@@ -821,7 +824,7 @@ function jsonEditor(value, onApply, rows = 8) {
 
 // ---------- discovery ----------
 
-// Discovery fills a provider in one place, d.target: 'opencode', 'zcode', 'pi' or the shared 'library'.
+// Discovery fills a provider in one place, d.target: 'opencode', 'zcode', 'pi', 't3' or the shared 'library'.
 // Returns { name, models: { id: … }, headers } for the provider being filled.
 function discTarget(d) {
   if (!d.pid) return null;
@@ -833,6 +836,10 @@ function discTarget(d) {
     const p = piProviders()[d.pid];
     return p && { name: p.name || d.pid, models: Object.fromEntries((p.models || []).map((m) => [m.id, m])), headers: p.headers };
   }
+  if (d.target === 't3') {
+    const inst = t3Instances()[d.pid];
+    return inst && { name: inst.displayName || d.pid, models: Object.fromEntries(t3Models(inst).map((m) => [m.id, m])) };
+  }
   if (d.target === 'library') {
     const p = S.shared?.providers.find((x) => x.key === d.pid);
     return p && { name: p.name, models: Object.fromEntries(p.models.map((m) => [m.id, m])), headers: p.headers };
@@ -840,12 +847,13 @@ function discTarget(d) {
   const p = providers()[d.pid];
   return p && { name: p.name, models: p.models || {}, headers: p.options?.headers };
 }
-const discTaken = (d, id) => (d.target === 'zcode' ? zcTaken(id) : d.target === 'pi' ? piTaken(id) : d.target === 'library' ? false : !!providers()[id]);
+const discTaken = (d, id) => (d.target === 'zcode' ? zcTaken(id) : d.target === 'pi' ? piTaken(id) : d.target === 't3' ? t3Taken(id) : d.target === 'library' ? false : !!providers()[id]);
 
 // API formats each target can write, as [value, label].
 const API_CHOICES = {
   zcode: [['openai-chat-completions', 'Chat completions'], ['anthropic-messages', 'Anthropic messages'], ['openai-responses', 'Responses']],
   pi: [['openai-completions', 'Chat completions'], ['anthropic-messages', 'Anthropic messages'], ['openai-responses', 'Responses'], ['google-generative-ai', 'Google Generative AI']],
+  t3: [['anthropic', 'Anthropic messages']],
   library: [['openai-chat', 'Chat completions'], ['anthropic', 'Anthropic messages'], ['openai-responses', 'Responses']],
 };
 function apiSelect(target, value, onchange) {
@@ -857,12 +865,13 @@ function startDiscovery(pid, target = 'opencode') {
   const z = pid && target === 'zcode' ? zcRule(pid)?.config : null;
   const pp = pid && target === 'pi' ? piProviders()[pid] : null;
   const sp = pid && target === 'library' ? S.shared?.providers.find((x) => x.key === pid) : null;
+  const ti = pid && target === 't3' ? t3Instances()[pid] : null;
   S.discovery = {
     target,
     pid: pid || null,
-    baseURL: p?.options?.baseURL || z?.api?.baseUrl || pp?.baseUrl || sp?.baseURL || '',
+    baseURL: p?.options?.baseURL || z?.api?.baseUrl || pp?.baseUrl || sp?.baseURL || t3Value(ti, T3_BASE) || '',
     // A {cmd:…} key can't be resolved here; the endpoint list is often public anyway.
-    apiKey: p?.options?.apiKey || z?.access?.apiKey || piKeyRef(pp?.apiKey) || (sp?.apiKey?.startsWith('{cmd:') ? '' : sp?.apiKey) || '',
+    apiKey: p?.options?.apiKey || z?.access?.apiKey || piKeyRef(pp?.apiKey) || (sp?.apiKey?.startsWith('{cmd:') ? '' : sp?.apiKey) || t3Key(ti) || '',
     apiType: API_CHOICES[target]?.[0][0],
     keyMode: 'literal',
     envName: '',
@@ -972,7 +981,7 @@ function viewDiscovery() {
     : h(
         'div',
         { class: 'card flush' },
-        h('div', { class: 'card-head' }, avatar(d.newId || r.hint.id, d.newName || r.hint.name), h('div', { style: 'flex:1' }, h('h2', null, { opencode: 'New OpenCode provider', zcode: 'New Z-Code provider', pi: 'New Pi provider', library: 'New shared provider' }[d.target]), h('div', { class: 'sub' }, `Detected ${r.hint.name} (${r.hint.source === 'guess' ? 'guessed from the URL' : 'from ' + r.hint.source})`, r.hint.doc ? [' · ', h('a', { href: r.hint.doc, target: '_blank', rel: 'noopener' }, 'Docs')] : null))),
+        h('div', { class: 'card-head' }, avatar(d.newId || r.hint.id, d.newName || r.hint.name), h('div', { style: 'flex:1' }, h('h2', null, { opencode: 'New OpenCode provider', zcode: 'New Z-Code provider', pi: 'New Pi provider', t3: 'New T3 Code provider', library: 'New shared provider' }[d.target]), h('div', { class: 'sub' }, `Detected ${r.hint.name} (${r.hint.source === 'guess' ? 'guessed from the URL' : 'from ' + r.hint.source})`, r.hint.doc ? [' · ', h('a', { href: r.hint.doc, target: '_blank', rel: 'noopener' }, 'Docs')] : null))),
         h(
           'div',
           { class: 'card-body' },
@@ -981,10 +990,12 @@ function viewDiscovery() {
             { class: 'grid four' },
             field('Provider ID', h('input', { type: 'text', class: 'mono-input', value: d.newId, oninput: (e) => (d.newId = e.target.value.trim()) }), 'Models become id/model-name'),
             field('Display name', h('input', { type: 'text', value: d.newName, oninput: (e) => (d.newName = e.target.value) })),
-            d.target !== 'opencode'
-              ? field('API format', apiSelect(d.target, d.apiType, (v) => (d.apiType = v)), 'Most custom endpoints use Chat completions')
-              : field('npm package', h('input', { type: 'text', class: 'mono-input', value: d.newNpm, list: 'npm-list2', oninput: (e) => (d.newNpm = e.target.value.trim()) })),
-            d.target === 'zcode' ? null : field(
+            d.target === 't3'
+              ? null
+              : d.target !== 'opencode'
+                ? field('API format', apiSelect(d.target, d.apiType, (v) => (d.apiType = v)), 'Most custom endpoints use Chat completions')
+                : field('npm package', h('input', { type: 'text', class: 'mono-input', value: d.newNpm, list: 'npm-list2', oninput: (e) => (d.newNpm = e.target.value.trim()) })),
+            d.target === 'zcode' || d.target === 't3' ? null : field(
               'Store the API key as',
               h(
                 'select',
@@ -994,7 +1005,7 @@ function viewDiscovery() {
                 h('option', { value: 'none', selected: d.keyMode === 'none' }, "Don't store a key")
               )
             ),
-            d.target !== 'zcode' && d.keyMode === 'env' ? field('Variable name', h('input', { type: 'text', class: 'mono-input', value: d.envName, oninput: (e) => (d.envName = e.target.value.trim()) }), `Saved as ${d.target === 'pi' ? '$' + (d.envName || 'NAME') : `{env:${d.envName || 'NAME'}}`}`) : null
+            d.target !== 'zcode' && d.target !== 't3' && d.keyMode === 'env' ? field('Variable name', h('input', { type: 'text', class: 'mono-input', value: d.envName, oninput: (e) => (d.envName = e.target.value.trim()) }), `Saved as ${d.target === 'pi' ? '$' + (d.envName || 'NAME') : `{env:${d.envName || 'NAME'}}`}`) : null
           ),
           h('datalist', { id: 'npm-list2' }, NPM_OPTIONS.map((o) => h('option', { value: o })))
         )
@@ -1102,6 +1113,7 @@ function addSelected() {
   const d = S.discovery;
   if (d.target === 'zcode') return zcAddSelected();
   if (d.target === 'pi') return piAddSelected();
+  if (d.target === 't3') return t3AddSelected();
   if (d.target === 'library') return libAddSelected();
   const r = d.result;
   let pid = d.pid;
@@ -2150,7 +2162,7 @@ function zcModelEditor(pid, mid) {
 }
 
 // ---------- shared providers view ----------
-// One list of every custom provider found in OpenCode, Z-Code and Pi, plus the
+// One list of every custom provider found in OpenCode, Z-Code, Pi and T3 Code, plus the
 // ones saved in Switchyard's library, matched by endpoint. Copies go straight to
 // the harness file on disk (with a .bak), so unsaved edits there must be saved first.
 
@@ -2158,9 +2170,12 @@ const HARNESS_LIST = [
   ['opencode', 'OpenCode', 'violet'],
   ['zcode', 'Z-Code', 'cyan'],
   ['pi', 'Pi', 'amber'],
+  ['t3', 'T3 Code', 'rose'],
 ];
 const harnessName = (id) => HARNESS_LIST.find(([h]) => h === id)?.[1] || id;
-const harnessDirty = (id) => (id === 'opencode' ? isDirty() : id === 'zcode' ? zcDirty() : piDirty());
+const harnessDirty = (id) => (id === 'opencode' ? isDirty() : id === 'zcode' ? zcDirty() : id === 'pi' ? piDirty() : t3Dirty());
+// T3 Code reaches custom endpoints through Claude Code, so only Anthropic-style ones can go there.
+const canCopy = (p, id) => id !== 't3' || p.api === 'anthropic';
 
 async function loadShared() {
   try {
@@ -2190,7 +2205,8 @@ async function sharedCopy(p, to, models) {
     toast(`${res.added ? `Copied ${res.added} model${res.added === 1 ? '' : 's'}` : 'Already up to date'} in ${harnessName(to)} as "${res.id}".${res.notes.length ? ' Note: ' + res.notes.join('; ') + '.' : ''}`);
     if (to === 'opencode') applyState(await api('GET', '/api/state'));
     else if (to === 'zcode') await loadZc();
-    else await loadPi();
+    else if (to === 'pi') await loadPi();
+    else await loadT3();
   } catch (e) {
     toast(e.message, 'error');
   }
@@ -2310,6 +2326,7 @@ function viewShared() {
     const inH = p.in[id];
     const missing = p.models.filter((m) => !inH?.models.includes(m.id)).length;
     const busy = S.copying === `${p.key}>${id}`;
+    if (!canCopy(p, id)) return h('span', { class: 'tag off', title: 'T3 Code only takes Anthropic-style endpoints. Copy this one to OpenCode or Pi and turn that provider on in T3 Code.' }, 'Not supported');
     if (inH && !missing) return h('span', { class: 'tag green', title: `In ${harnessName(id)} as "${inH.id}" with ${inH.models.length} models` }, icon('check'), inH.id);
     const label = inH ? `+${missing}` : 'Copy';
     return h(
@@ -2365,7 +2382,7 @@ function viewShared() {
         { class: 'card empty' },
         h('span', { class: 'icon-chip' }, icon('layers')),
         h('h2', null, 'No custom providers yet'),
-        h('p', null, 'Providers you add to OpenCode, Z-Code or Pi show up here automatically. You can also add one here and copy it to each harness.'),
+        h('p', null, 'Providers you add to OpenCode, Z-Code, Pi or T3 Code show up here automatically. You can also add one here and copy it to each harness.'),
         h('button', { class: 'btn primary', onclick: () => startDiscovery(null, 'library') }, icon('download'), 'Add from endpoint')
       );
   return h('div', null, head, status, notes, table, sh.library?.error ? h('div', { class: 'error-box' }, icon('alert'), `Library file unreadable: ${sh.library.error}`) : null);
@@ -2387,7 +2404,7 @@ function sharedDetail(p) {
         { class: 'btn-row', style: 'flex-wrap:wrap' },
         h('span', { class: 'muted small' }, `${sel.size} of ${p.models.length} models selected. API: ${{ 'openai-chat': 'Chat completions', 'openai-responses': 'Responses', anthropic: 'Anthropic messages' }[p.api] || p.api}`),
         h('span', { class: 'spacer' }),
-        HARNESS_LIST.map(([id, name]) => h('button', { class: 'btn sm', disabled: !sel.size || !!S.copying, onclick: () => sharedCopy(p, id, picked()) }, icon('download'), `Copy selected to ${name}`))
+        HARNESS_LIST.filter(([id]) => canCopy(p, id)).map(([id, name]) => h('button', { class: 'btn sm', disabled: !sel.size || !!S.copying, onclick: () => sharedCopy(p, id, picked()) }, icon('download'), `Copy selected to ${name}`))
       )
     ),
     p.models.length
@@ -2797,6 +2814,275 @@ function piModelEditor(pid, m) {
   );
 }
 
+// ---------- T3 Code view ----------
+// Edits providerInstances in T3 Code's userdata/settings.json. Only claudeAgent instances
+// pointed at a custom endpoint are listed; every other setting and instance is left alone.
+// T3 watches the file, so saved changes apply without a restart.
+
+const T3_BASE = 'ANTHROPIC_BASE_URL';
+const T3_TOKEN = 'ANTHROPIC_AUTH_TOKEN';
+const t3Dirty = () => !!(S.t3?.doc && JSON.stringify(S.t3.doc) !== S.t3.saved);
+function t3Instances() {
+  if (!S.t3?.doc) return {};
+  if (!isObj(S.t3.doc.providerInstances)) S.t3.doc.providerInstances = {};
+  return S.t3.doc.providerInstances;
+}
+const t3Var = (inst, name) => (inst?.environment || []).find((v) => v.name === name);
+const t3Value = (inst, name) => t3Var(inst, name)?.value || '';
+const t3StoredKey = (inst) => { const v = t3Var(inst, T3_TOKEN); return !!(v && (v.valueRedacted || v.secret)); };
+const t3Key = (inst) => { const v = t3Value(inst, T3_TOKEN); return v === 'none' ? '' : v; };
+const t3Custom = () => Object.entries(t3Instances()).filter(([, x]) => x?.driver === 'claudeAgent' && t3Var(x, T3_BASE)).map(([id]) => id);
+const t3Taken = (id) => !!t3Instances()[id] || (S.t3?.reserved || []).includes(id);
+const t3Slug = (v) => { const s = zcSlug(v); return /^[a-z]/.test(s) ? s : `provider-${s}`; };
+const t3Root = (url) => String(url || '').trim().replace(/\/+$/, '').replace(/\/v1$/i, '');
+const t3Models = (inst) => (inst.config?.customModels || []).map((m) => (typeof m === 'string' ? { id: m } : { id: m.slug, name: m.name }));
+const t3CountEl = () => { document.getElementById('count-t3').textContent = t3Custom().length || ''; };
+
+// Same shape as t3Instance() in src/t3.js.
+function t3NewInstance(name, baseURL, key) {
+  return {
+    driver: 'claudeAgent',
+    displayName: name,
+    enabled: true,
+    environment: [
+      { name: T3_BASE, value: t3Root(baseURL), sensitive: false },
+      { name: T3_TOKEN, value: key || 'none', sensitive: true },
+      { name: 'ANTHROPIC_API_KEY', value: '', sensitive: false },
+    ],
+    config: { customModels: [] },
+  };
+}
+
+async function loadT3() {
+  try {
+    const r = await api('GET', '/api/t3');
+    S.t3 = { ...r, saved: r.doc ? JSON.stringify(r.doc) : '' };
+  } catch (e) {
+    S.t3 = { error: e.message, doc: null };
+  }
+  if (S.tsel && !t3Instances()[S.tsel]) S.tsel = null;
+  t3CountEl();
+  if (S.view === 't3') render();
+}
+
+async function saveT3() {
+  if (S.t3.hasComments && !confirm('settings.json contains comments. Saving rewrites it as plain JSON, so the comments will be removed (a .bak backup is kept). Continue?')) return;
+  try {
+    const r = await api('POST', '/api/t3/save', { doc: S.t3.doc });
+    S.t3 = { ...S.t3, ...r, saved: JSON.stringify(r.doc) };
+    render();
+    toast(r.backup ? `Saved. Backup: ${r.backup}` : 'Saved. T3 Code picks it up right away.');
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+function t3Changed() {
+  t3CountEl();
+  render();
+}
+
+function t3AddSelected() {
+  const d = S.discovery;
+  let pid = d.pid;
+  const list = t3Instances();
+  if (!pid) {
+    pid = t3Slug(d.newId);
+    if (t3Taken(pid)) return toast(`"${pid}" already exists or is one of T3 Code's own providers. Pick another ID.`, 'error');
+    list[pid] = t3NewInstance(d.newName || pid, d.baseURL, d.apiKey.trim());
+  }
+  const inst = list[pid];
+  inst.config = isObj(inst.config) ? inst.config : {};
+  const custom = (inst.config.customModels = Array.isArray(inst.config.customModels) ? inst.config.customModels : []);
+  let added = 0;
+  for (const m of d.result.models) {
+    if (!d.selected.has(m.id)) continue;
+    if (custom.some((x) => (typeof x === 'string' ? x : x.slug) === m.id)) continue;
+    const name = m.suggestion?.name;
+    custom.push(name && name !== m.id ? { slug: m.id, name } : m.id);
+    added++;
+  }
+  S.discovery = null;
+  S.tsel = pid;
+  S.ttab = 'models';
+  t3Changed();
+  toast(`Added ${added} model${added === 1 ? '' : 's'} to ${pid}. Save to write the file.`);
+}
+
+function viewT3() {
+  const z = S.t3;
+  const dirty = t3Dirty();
+  const head = (actions) => h('div', { class: 'page-head' }, h('div', null, h('h1', null, 'T3 Code providers'), h('div', { class: 'sub' }, 'Custom endpoints for T3 Code. Each one runs through Claude Code, so it has to speak the Anthropic API.')), actions);
+  if (!z) return h('div', null, head(null), h('div', { class: 'card empty' }, 'Loading…'));
+  if (!z.doc) return h('div', null, head(null), h('div', { class: 'error-box' }, icon('alert'), h('span', null, `Could not read ${z.path || 'settings.json'}: ${z.error}`)));
+  const ids = t3Custom();
+  if (!S.discovery && (!S.tsel || !ids.includes(S.tsel)) && ids.length) S.tsel = ids[0];
+  const adding = !!(S.discovery && !S.discovery.pid);
+  const addBlank = () => {
+    const name = prompt('Name shown in T3 Code:', 'My provider')?.trim();
+    if (!name) return;
+    const id = t3Slug(name);
+    if (t3Taken(id)) return toast(`"${id}" already exists or is one of T3 Code's own providers.`, 'error');
+    t3Instances()[id] = t3NewInstance(name, '', '');
+    S.tsel = id;
+    S.ttab = 'connection';
+    S.discovery = null;
+    t3Changed();
+  };
+
+  const list = h(
+    'div',
+    { class: 'card plist' },
+    h('div', { class: 'plist-head' }, h('h2', null, 'T3 Code providers'), h('span', { class: 'count' }, ids.length)),
+    ids.length ? null : h('div', { class: 'empty-inline' }, 'Nothing here yet.'),
+    ids.map((id) => {
+      const x = t3Instances()[id];
+      return h(
+        'button',
+        { class: 'pitem' + (S.tsel === id && !S.discovery ? ' active' : ''), onclick: () => { S.tsel = id; S.discovery = null; render(); } },
+        avatar(id, x.displayName || id),
+        h('span', { class: 'ptxt' }, h('span', { class: 'pname' }, x.displayName || id), h('span', { class: 'purl' }, (x.enabled === false ? 'Off · ' : '') + (t3Value(x, T3_BASE) || 'No base URL').replace(/^https?:\/\//, ''))),
+        h('span', { class: 'pn' }, t3Models(x).length)
+      );
+    }),
+    adding ? h('button', { class: 'pitem active' }, h('span', { class: 'avatar', style: '--h: var(--accent)' }, icon('plus')), h('span', { class: 'ptxt' }, h('span', { class: 'pname' }, 'New provider'), h('span', { class: 'purl' }, S.discovery.baseURL.replace(/^https?:\/\//, '') || 'Connect an endpoint'))) : null,
+    h('div', { class: 'plist-add' }, h('button', { class: 'btn ghost sm', onclick: addBlank }, icon('plus'), 'Blank provider'))
+  );
+
+  let right;
+  if (S.discovery) right = viewDiscovery();
+  else if (S.tsel && t3Instances()[S.tsel]) right = viewT3Provider(S.tsel);
+  else
+    right = h(
+      'div',
+      { class: 'card empty' },
+      h('span', { class: 'icon-chip' }, icon('link')),
+      h('h2', null, 'Add a custom endpoint to T3 Code'),
+      h('p', null, 'Paste the base URL of an Anthropic-compatible endpoint and pick its models. For OpenAI-style endpoints, add them to OpenCode or Pi and turn that provider on in T3 Code.'),
+      h('div', { class: 'btn-row', style: 'justify-content:center' }, h('button', { class: 'btn primary', onclick: () => startDiscovery(null, 't3') }, icon('plus'), 'Add from endpoint'), h('button', { class: 'btn', onclick: () => go('shared') }, 'Shared providers'))
+    );
+
+  return h(
+    'div',
+    null,
+    head(
+      h(
+        'div',
+        { class: 'btn-row' },
+        h('button', { class: 'btn ghost', onclick: () => { if (!dirty || confirm('Discard unsaved T3 Code changes?')) loadT3(); } }, icon('refresh'), dirty ? 'Discard' : 'Reload'),
+        h('button', { class: 'btn', onclick: () => startDiscovery(null, 't3'), disabled: adding }, icon('plus'), 'Add from endpoint'),
+        h('button', { class: 'btn primary', onclick: saveT3, disabled: !dirty }, 'Save')
+      )
+    ),
+    h('div', { class: 'muted small', style: 'margin:-8px 0 14px' }, h('code', null, z.path), z.exists ? null : h('span', { class: 'tag plain', style: 'margin-left:8px' }, 'New file'), dirty ? h('span', { class: 'tag amber', style: 'margin-left:8px' }, 'Unsaved') : null),
+    h('div', { class: 'split' }, list, right)
+  );
+}
+
+function viewT3Provider(pid) {
+  const inst = t3Instances()[pid];
+  const models = t3Models(inst);
+  const stored = t3StoredKey(inst);
+  const key = t3Key(inst);
+  const base = t3Value(inst, T3_BASE);
+  const setVar = (name, value) => {
+    const v = t3Var(inst, name);
+    v.value = value;
+    t3Changed();
+  };
+  // A new key replaces whatever T3 had stored, including a reference to its secret store.
+  const setKey = (value) => {
+    inst.environment = inst.environment.map((v) => (v.name === T3_TOKEN ? { name: T3_TOKEN, value: value || 'none', sensitive: true } : v));
+    t3Changed();
+  };
+  const tab = (id, label, count) => h('button', { class: 'tab' + (S.ttab === id ? ' on' : ''), role: 'tab', 'aria-selected': String(S.ttab === id), onclick: () => { S.ttab = id; render(); } }, label, count !== undefined ? h('span', { class: 'tcount' }, count) : null);
+  const remove = () => {
+    if (!confirm(`Delete "${inst.displayName || pid}" from T3 Code's settings? Threads that used it stay in T3 Code but can't continue on it.`)) return;
+    delete t3Instances()[pid];
+    S.tsel = null;
+    t3Changed();
+  };
+  const addById = () => {
+    const id = prompt('Model ID exactly as the endpoint expects it:')?.trim();
+    if (!id) return;
+    if (models.some((m) => m.id === id)) return toast('That model is already added', 'error');
+    inst.config = isObj(inst.config) ? inst.config : {};
+    inst.config.customModels = [...(inst.config.customModels || []), id];
+    S.ttab = 'models';
+    t3Changed();
+  };
+  const hero = h(
+    'div',
+    { class: 'phero' },
+    h(
+      'div',
+      { class: 'phero-top' },
+      avatar(pid, inst.displayName || pid, 'lg'),
+      h(
+        'div',
+        { class: 'phero-title' },
+        h('h2', null, inst.displayName || pid, h('span', { class: 'tag mono plain' }, pid)),
+        h('div', { class: 'phero-meta' }, base ? h('span', { class: 'url', title: base }, base) : h('span', { class: 'tag amber' }, 'No base URL'), h('span', { class: 'tag blue' }, 'Anthropic messages'), stored ? h('span', { class: 'tag green' }, icon('key'), 'in T3 secret store') : key ? h('span', { class: 'tag green' }, icon('key'), 'key set') : null, inst.enabled === false ? h('span', { class: 'tag off' }, 'Off') : null)
+      ),
+      h('div', { class: 'btn-row' }, h('button', { class: 'btn sm', onclick: () => startDiscovery(pid, 't3'), disabled: !base }, icon('download'), 'Fetch models'), h('button', { class: 'btn sm icon ghost danger', onclick: remove, title: 'Delete provider', 'aria-label': 'Delete provider' }, icon('trash')))
+    ),
+    h('div', { class: 'tabs', role: 'tablist' }, tab('models', 'Models', models.length), tab('connection', 'Connection'), tab('json', 'JSON'))
+  );
+  let panel;
+  if (S.ttab === 'connection') {
+    panel = h(
+      'div',
+      { class: 'card-body tabpanel' },
+      h(
+        'div',
+        { class: 'grid two' },
+        field('Base URL', textInput(base, (v) => setVar(T3_BASE, t3Root(v)), { placeholder: 'https://api.example.com/anthropic', class: 'mono-input' }), 'The API root, without /v1. Claude Code adds /v1/messages itself.'),
+        field('API key', apiKeyInput(key, (v) => setKey(v.trim())), stored ? 'T3 Code holds this key in its secret store. Type here only to replace it.' : 'Stored as plain text in settings.json.'),
+        field('Display name', textInput(inst.displayName, (v) => { if (v.trim()) inst.displayName = v.trim(); t3Changed(); }), 'Shown in T3 Code\'s model picker')
+      ),
+      h('label', { class: 'check', style: 'margin-top:16px' }, h('input', { type: 'checkbox', checked: inst.enabled !== false, onchange: (e) => { inst.enabled = e.target.checked; t3Changed(); } }), 'Turned on in T3 Code')
+    );
+  } else if (S.ttab === 'json') {
+    panel = h(
+      'div',
+      { class: 'card-body tabpanel' },
+      h('div', { class: 'note info', style: 'margin-bottom:16px' }, icon('info'), h('span', null, 'The raw instance (environment, launchArgs, homePath…). Apply updates the page; Save writes the file.')),
+      jsonEditor(inst, (v) => {
+        if (!isObj(v) || !v.driver) throw new Error('An instance needs a driver');
+        t3Instances()[pid] = v;
+        t3Changed();
+      }, 18)
+    );
+  } else {
+    const rows = models.map((m, i) =>
+      h(
+        'tr',
+        null,
+        h('td', null, h('div', { class: 'mcell' }, h('div', { class: 'mid', title: m.id }, m.id), m.name ? h('div', { class: 'msub' }, m.name) : null)),
+        h('td', { class: 'actions' }, h('div', { class: 'row-actions' }, h('button', { class: 'btn sm icon ghost danger', title: `Remove ${m.id}`, 'aria-label': `Remove ${m.id}`, onclick: () => { inst.config.customModels = inst.config.customModels.filter((_, n) => n !== i); t3Changed(); } }, icon('trash'))))
+      )
+    );
+    panel = h(
+      'div',
+      { class: 'tabpanel' },
+      models.length
+        ? [
+            h('div', { class: 'toolbar' }, h('span', { class: 'muted small' }, `${models.length} model${models.length === 1 ? '' : 's'}. T3 Code keeps only the ID and name.`), h('span', { class: 'spacer' }), h('button', { class: 'btn sm ghost', onclick: addById }, icon('plus'), 'Add by ID'), h('button', { class: 'btn sm soft', onclick: () => startDiscovery(pid, 't3'), disabled: !base }, icon('download'), 'Fetch more')),
+            h('div', { class: 'tablewrap' }, h('table', null, h('thead', null, h('tr', null, h('th', null, 'Model'), h('th', null))), h('tbody', null, rows))),
+          ]
+        : h(
+            'div',
+            { class: 'empty' },
+            h('span', { class: 'icon-chip', style: '--h: var(--violet)' }, icon('layers')),
+            h('h2', null, 'No models yet'),
+            h('p', null, base ? 'Fetch the list this endpoint serves and pick the ones you want, or add a model by its ID.' : 'Set a base URL on the Connection tab first, then fetch its models.'),
+            h('div', { class: 'btn-row', style: 'justify-content:center' }, h('button', { class: 'btn primary', onclick: () => (base ? startDiscovery(pid, 't3') : ((S.ttab = 'connection'), render())) }, icon(base ? 'download' : 'link'), base ? 'Fetch models' : 'Set base URL'), h('button', { class: 'btn', onclick: addById }, 'Add by ID'))
+          )
+    );
+  }
+  return h('div', { class: 'card flush' }, hero, panel);
+}
+
 // ---------- raw view ----------
 
 function viewRaw() {
@@ -2867,7 +3153,7 @@ document.querySelectorAll('.nav').forEach((n) =>
     render();
   })
 );
-document.querySelectorAll('#harness-switch button').forEach((b) => b.addEventListener('click', () => go(HARNESS_HOME[b.dataset.harness])));
+document.getElementById('harness-select').addEventListener('change', (e) => go(HARNESS_HOME[e.target.value]));
 document.getElementById('save').addEventListener('click', save);
 const reloadFromDisk = () => {
   if (isDirty() && !confirm('Discard unsaved changes?')) return;
@@ -2897,11 +3183,12 @@ document.addEventListener('keydown', (e) => {
     if (S.view === 'files' && S.doc && (docDirty() || !S.doc.exists)) saveDoc();
     else if (S.view === 'zcode' && zcDirty()) saveZc();
     else if (S.view === 'pi' && piDirty()) savePi();
+    else if (S.view === 't3' && t3Dirty()) saveT3();
     else if (isDirty()) save();
   }
 });
 window.addEventListener('beforeunload', (e) => {
-  if (isDirty() || docDirty() || zcDirty() || piDirty()) {
+  if (isDirty() || docDirty() || zcDirty() || piDirty() || t3Dirty()) {
     e.preventDefault();
     e.returnValue = '';
   }

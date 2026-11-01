@@ -8,7 +8,7 @@ const pkg = require('../package.json');
 const HELP = `
 switchyard v${pkg.version}
 One provider list for your coding agents. A local web UI that reads the custom
-providers from OpenCode, Z-Code and Pi, and copies them between them.
+providers from OpenCode, Z-Code, Pi and T3 Code, and copies them between them.
 
 Usage:
   npx @spacatty/switchyard [options]
@@ -17,6 +17,7 @@ Options:
   -c, --config <path>        OpenCode config to edit (default: auto-detect)
       --zcode-config <path>  Z-Code provider_config.json (default: ~/.zcode/v2/provider_config.json)
       --pi-config <path>     Pi models.json (default: ~/.pi/agent/models.json)
+      --t3-config <path>     T3 Code settings.json (default: ~/.t3/userdata/settings.json)
       --library <path>       Shared provider library (default: ~/.config/switchyard/providers.json)
   -p, --port <port>          Port to listen on (default: 4747, falls back to a free port)
       --no-open              Don't open the browser automatically
@@ -25,7 +26,7 @@ Options:
 `;
 
 function parseArgs(argv) {
-  const opts = { port: 4747, open: true, config: null, zcodeConfig: null, piConfig: null, library: null, portExplicit: false };
+  const opts = { port: 4747, open: true, config: null, zcodeConfig: null, piConfig: null, t3Config: null, library: null, portExplicit: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '-h' || a === '--help') opts.help = true;
@@ -37,6 +38,7 @@ function parseArgs(argv) {
     } else if (a === '-c' || a === '--config') opts.config = argv[++i];
     else if (a === '--zcode-config') opts.zcodeConfig = argv[++i];
     else if (a === '--pi-config') opts.piConfig = argv[++i];
+    else if (a === '--t3-config') opts.t3Config = argv[++i];
     else if (a === '--library') opts.library = argv[++i];
     else {
       console.error(`Unknown option: ${a}\n${HELP}`);
@@ -83,7 +85,7 @@ async function main() {
     process.exit(1);
   }
 
-  const { server, token, state } = createServer({ configPath: opts.config, zcodePath: opts.zcodeConfig, piPath: opts.piConfig, libraryPath: opts.library });
+  const { server, token, state } = createServer({ configPath: opts.config, zcodePath: opts.zcodeConfig, piPath: opts.piConfig, t3Path: opts.t3Config, libraryPath: opts.library });
   let port;
   try {
     port = await listen(server, opts.port);
@@ -97,6 +99,7 @@ async function main() {
   console.log(`  OpenCode: ${state.target}`);
   console.log(`  Z-Code:   ${state.zcode}`);
   console.log(`  Pi:       ${state.pi}`);
+  console.log(`  T3 Code:  ${state.t3}`);
   console.log(`  Library:  ${state.library}`);
   console.log(`  Open:     ${url}\n`);
   console.log('  Press Ctrl+C to stop.\n');

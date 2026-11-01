@@ -4,7 +4,7 @@ Instructions for AI coding agents (OpenCode, Claude Code, Codex, etc.) working o
 
 ## What this is
 
-Switchyard (`@spacatty/switchyard`, command `switchyard`, old alias `occ-manager`) is a zero-dependency Node (>=18) CLI, run with `npx @spacatty/switchyard`. It starts a local web UI that keeps one list of custom model providers across coding agents ("harnesses"): OpenCode (`opencode.json(c)`), Z-Code (`~/.zcode/v2/provider_config.json`) and Pi (`~/.pi/agent/models.json`). It parses each harness's providers into one merged list (matched by base URL), copies providers between harnesses, keeps a library of its own, and has a full editor per harness.
+Switchyard (`@spacatty/switchyard`, command `switchyard`, old alias `occ-manager`) is a zero-dependency Node (>=18) CLI, run with `npx @spacatty/switchyard`. It starts a local web UI that keeps one list of custom model providers across coding agents ("harnesses"): OpenCode (`opencode.json(c)`), Z-Code (`~/.zcode/v2/provider_config.json`), Pi (`~/.pi/agent/models.json`) and T3 Code (`~/.t3/userdata/settings.json`). It parses each harness's providers into one merged list (matched by base URL), copies providers between harnesses, keeps a library of its own, and has a full editor per harness.
 
 - `bin/cli.js`: arg parsing, port fallback, cross-platform browser opening
 - `src/server.js`: `node:http` server bound to 127.0.0.1, token + Host-header checks
@@ -12,7 +12,8 @@ Switchyard (`@spacatty/switchyard`, command `switchyard`, old alias `occ-manager
 - `src/files.js`: lists, reads and writes the other files OpenCode reads (global/project `AGENTS.md`, `agents/`, `commands/`, `modes/`, `.gitignore`/`.ignore`). Only listed paths (or new `.md` files in those folders) can be touched; delete renames to `.bak`
 - `src/shared.js`: the shared list. Converts each harness format to and from one neutral provider/model shape (`fromOpenCode` / `fromZcode` / `fromPi`, `applyTo`), merges by `urlKey()`, converts API keys between harness syntaxes (`convertKey`), and reads/writes the library file (`~/.config/switchyard/providers.json`)
 - `src/pi.js`: Pi's `models.json` (path lookup incl. `PI_CODING_AGENT_DIR`, validation mirroring Pi's TypeBox schema and `validateConfig()`, built-in provider names)
-- `src/zcode.js`: Z-Code's `~/.zcode/v2/provider_config.json` (path lookup, validation mirroring Z-Code's Zod schemas, default reasoning maps, running-process check). The UI side is the `Z-Code view` section of `public/app.js`; the `shared providers view` and `Pi view` sections hold the other two
+- `src/zcode.js`: Z-Code's `~/.zcode/v2/provider_config.json` (path lookup, validation mirroring Z-Code's Zod schemas, default reasoning maps, running-process check). The UI side is the `Z-Code view` section of `public/app.js`; the `shared providers view`, `Pi view` and `T3 Code view` sections hold the others
+- `src/t3.js`: T3 Code's `settings.json` (path lookup incl. `T3CODE_HOME`, validation mirroring its `ProviderInstanceConfig`, the claudeAgent instance a custom endpoint becomes)
 - `src/discover.js`: lists `/models` from an endpoint, enriches with models.dev, builds suggested model entries
 - `src/jsonc.js`: comment/trailing-comma tolerant parser
 - `public/`: vanilla JS UI, no build step
@@ -49,12 +50,16 @@ Z-Code has no public schema. `src/zcode.js` mirrors its Zod validators (bundled 
 
 `src/pi.js` mirrors `ModelsConfigSchema` and `validateConfig()` in Pi's `dist/core/model-registry.js` (`@earendil-works/pi-coding-agent`). Non-built-in providers with models need `baseUrl`, `apiKey` and an `api`; `cost` needs all four rates. API key values use Pi's syntax: `$VAR` / `${VAR}`, `!command`, `$$` / `$!` escapes. Docs: `docs/models.md` in the Pi package.
 
+## T3 Code format
+
+T3 Code has no provider list; it runs other agents through compiled-in drivers. `src/t3.js` writes the one route that takes a custom endpoint: a `claudeAgent` entry in `providerInstances` with `ANTHROPIC_BASE_URL` (no `/v1`), `ANTHROPIC_AUTH_TOKEN`, an empty `ANTHROPIC_API_KEY` and `config.customModels`. So only `api: 'anthropic'` providers can be copied there; OpenAI-style ones go to OpenCode or Pi, which T3 runs as drivers. Don't add the Codex driver without proving Codex honours these variables: T3 strips `OPENAI_BASE_URL` / `OPENAI_API_KEY` in managed mode. The file is T3's whole settings file, so keep every other key. T3 may move sensitive values to its secret store, leaving `valueRedacted` or `secret` on the variable; those keys can't be read and must never be overwritten. A value that fails to decode makes T3 fall back to defaults for the whole file. To check against the real schema, run `t3 serve --base-dir <tmp>` and look for `failed to parse settings.json`; never use the real `~/.t3`. Schemas are in `resources/server.asar` (`apps/server/dist/binCli-*.mjs`).
+
 ## Adding a harness
 
 1. A `src/<harness>.js` with `<harness>ConfigPath()`, `read…()`, `write…()` (validating, `.bak`, atomic via `writeConfig`).
 2. In `src/shared.js`: a `from<Harness>()` parser, a branch in `applyTo()`, a branch in `convertKey()`, and an entry in `HARNESSES`.
 3. In `src/server.js`: its path in `state`, `GET`/`POST` routes, and a branch in `copyToHarness()` and `sharedResponse()`.
-4. In `public/`: a view, a `data-harness-group` nav group and switcher button in `index.html`, and entries in `VIEW_HARNESS`, `HARNESS_HOME`, `HARNESS_LIST`, `API_CHOICES` and discovery's `discTarget()` / `addSelected()`.
+4. In `public/`: a view, a `data-harness-group` nav group and a `harness-select` option in `index.html`, and entries in `VIEW_HARNESS`, `HARNESS_HOME`, `HARNESS_LIST`, `API_CHOICES` and discovery's `discTarget()` / `addSelected()`.
 5. A CLI flag for its path, and smoke-test coverage.
 
 ## Rules
@@ -64,4 +69,4 @@ Z-Code has no public schema. `src/zcode.js` mirrors its Zod validators (bundled 
 - Never log or transmit API keys. Keys only go to the endpoint the user typed.
 - Keep the server bound to `127.0.0.1` with the token and Host checks.
 - Writes must keep making a `.bak` and write atomically (tmp file + rename).
-- Verify with `npm test` (needs network; hits OpenRouter's public `/models` and opencode.ai) and by running `node bin/cli.js --config <tmp> --zcode-config <tmp> --pi-config <tmp> --library <tmp>` to try the UI. Pass all four: any you leave out points at the user's real file. Never test against the user's real configs without asking.
+- Verify with `npm test` (needs network; hits OpenRouter's public `/models` and opencode.ai) and by running `node bin/cli.js --config <tmp> --zcode-config <tmp> --pi-config <tmp> --t3-config <tmp> --library <tmp>` to try the UI. Pass all five: any you leave out points at the user's real file. Never test against the user's real configs without asking.

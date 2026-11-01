@@ -1,11 +1,12 @@
 {
   "name": "@spacatty/switchyard",
   "version": "0.2.0",
-  "description": "One provider list for your coding agents: a local web UI that shares custom OpenAI-compatible providers between OpenCode, Z-Code and Pi, with automatic model discovery.",
+  "description": "One provider list for your coding agents: a local web UI that shares custom OpenAI-compatible providers between OpenCode, Z-Code, Pi and T3 Code, with automatic model discovery.",
   "keywords": [
     "opencode",
     "zcode",
     "pi",
+    "t3code",
     "coding-agent",
     "llm",
     "openai-compatible",
