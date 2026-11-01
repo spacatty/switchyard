@@ -20,10 +20,16 @@
         <button data-view="shared" class="nav"><span class="ico" data-icon="layers"></span><span class="nav-text">Shared providers</span><span class="nav-count" id="count-shared"></span></button>
 
         <div class="nav-label">Harness</div>
-        <div class="seg harness-switch" id="harness-switch" role="group" aria-label="Harness">
-          <button data-harness="opencode">OpenCode</button>
-          <button data-harness="zcode">Z-Code</button>
-          <button data-harness="pi">Pi</button>
+        <div class="harness-picker" title="Choose which agent to edit">
+          <span class="hp-dot" id="harness-dot" aria-hidden="true"></span>
+          <span class="hp-name" id="harness-name">OpenCode</span>
+          <span class="hp-chev"><span data-icon="chevrons"></span></span>
+          <select id="harness-select" class="hp-select" aria-label="Harness">
+            <option value="opencode">OpenCode</option>
+            <option value="zcode">Z-Code</option>
+            <option value="pi">Pi</option>
+            <option value="t3">T3 Code</option>
+          </select>
         </div>
 
         <div class="nav-group" data-harness-group="opencode">
@@ -38,6 +44,9 @@
         </div>
         <div class="nav-group" data-harness-group="pi" hidden>
           <button data-view="pi" class="nav"><span class="ico" data-icon="server"></span><span class="nav-text">Providers</span><span class="nav-count" id="count-pi"></span></button>
+        </div>
+        <div class="nav-group" data-harness-group="t3" hidden>
+          <button data-view="t3" class="nav"><span class="ico" data-icon="server"></span><span class="nav-text">Providers</span><span class="nav-count" id="count-t3"></span></button>
         </div>
       </nav>
 

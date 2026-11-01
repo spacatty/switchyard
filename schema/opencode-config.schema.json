@@ -79,6 +79,10 @@
       "type": "string",
       "description": "Username displayed in conversations and used for telemetry identity"
     },
+    "timezone": {
+      "type": "string",
+      "description": "IANA time zone for schedules, e.g. America/Los_Angeles. Defaults to the server's local zone"
+    },
     "permissions": {
       "$ref": "#/$defs/Permission.Ruleset",
       "description": "Ordered tool permission rules applied to agent tool use"
@@ -93,7 +97,11 @@
             "enum": [
               "provider.use",
               "tool.use",
-              "integration.use"
+              "integration.connect",
+              "integration.use",
+              "mcp.use",
+              "skill.use",
+              "plugin.use"
             ]
           },
           "resource": {
@@ -198,14 +206,17 @@
             },
             "max_width": {
               "type": "integer",
+              "maximum": 9007199254740991,
               "exclusiveMinimum": 0
             },
             "max_height": {
               "type": "integer",
+              "maximum": 9007199254740991,
               "exclusiveMinimum": 0
             },
             "max_base64_bytes": {
               "type": "integer",
+              "maximum": 9007199254740991,
               "exclusiveMinimum": 0
             }
           },
@@ -220,11 +231,13 @@
       "properties": {
         "max_lines": {
           "type": "integer",
+          "maximum": 9007199254740991,
           "exclusiveMinimum": 0,
           "description": "Maximum lines of tool output before it is truncated and saved to disk (default: 2000)"
         },
         "max_bytes": {
           "type": "integer",
+          "maximum": 9007199254740991,
           "exclusiveMinimum": 0,
           "description": "Maximum bytes of tool output before it is truncated and saved to disk (default: 51200)"
         }
@@ -240,14 +253,17 @@
           "properties": {
             "startup": {
               "type": "integer",
+              "maximum": 9007199254740991,
               "exclusiveMinimum": 0
             },
             "catalog": {
               "type": "integer",
+              "maximum": 9007199254740991,
               "exclusiveMinimum": 0
             },
             "execution": {
               "type": "integer",
+              "maximum": 9007199254740991,
               "exclusiveMinimum": 0
             }
           },
@@ -308,14 +324,23 @@
           "properties": {
             "tokens": {
               "type": "integer",
-              "minimum": 0
+              "minimum": 0,
+              "maximum": 9007199254740991
             }
           },
           "additionalProperties": false
         },
         "buffer": {
-          "type": "integer",
-          "minimum": 0
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Config.Compaction.Percent"
+            },
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          ]
         },
         "prune": {
           "type": "boolean",
@@ -477,9 +502,59 @@
         "media_blob": {
           "type": "boolean"
         },
+        "image_generate": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "model": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^[^/#]+\\/[^#]+(?:#[^#]+)?$"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "providerID": {
+                          "type": "string",
+                          "pattern": "^[^/#]+$"
+                        },
+                        "model": {
+                          "type": "string",
+                          "pattern": "^[^#]+$"
+                        },
+                        "variant": {
+                          "type": "string",
+                          "pattern": "^[^#]+$"
+                        }
+                      },
+                      "required": [
+                        "providerID",
+                        "model"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
+        },
+        "schedules": {
+          "type": "boolean"
+        },
+        "artifacts": {
+          "type": "boolean"
+        },
         "subagent_depth": {
           "type": "integer",
-          "minimum": 0
+          "minimum": 0,
+          "maximum": 9007199254740991
         },
         "location_idle_timeout": {
           "anyOf": [
@@ -504,7 +579,11 @@
                 "enum": [
                   "provider.use",
                   "tool.use",
-                  "integration.use"
+                  "integration.connect",
+                  "integration.use",
+                  "mcp.use",
+                  "skill.use",
+                  "plugin.use"
                 ]
               },
               "resource": {
@@ -1669,6 +1748,7 @@
         },
         "steps": {
           "type": "integer",
+          "maximum": 9007199254740991,
           "exclusiveMinimum": 0
         },
         "disabled": {
@@ -1784,14 +1864,17 @@
           "properties": {
             "startup": {
               "type": "integer",
+              "maximum": 9007199254740991,
               "exclusiveMinimum": 0
             },
             "catalog": {
               "type": "integer",
+              "maximum": 9007199254740991,
               "exclusiveMinimum": 0
             },
             "execution": {
               "type": "integer",
+              "maximum": 9007199254740991,
               "exclusiveMinimum": 0
             }
           },
@@ -1875,14 +1958,17 @@
           "properties": {
             "startup": {
               "type": "integer",
+              "maximum": 9007199254740991,
               "exclusiveMinimum": 0
             },
             "catalog": {
               "type": "integer",
+              "maximum": 9007199254740991,
               "exclusiveMinimum": 0
             },
             "execution": {
               "type": "integer",
+              "maximum": 9007199254740991,
               "exclusiveMinimum": 0
             }
           },
@@ -1897,6 +1983,10 @@
         "url"
       ],
       "additionalProperties": false
+    },
+    "Config.Compaction.Percent": {
+      "type": "string",
+      "pattern": "^([1-9]\\d?(\\.\\d+)?)%$"
     },
     "Config.CommandEncoded": {
       "type": "object",
@@ -2052,7 +2142,17 @@
           "type": "string"
         },
         "interval": {
-          "type": "string"
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "auto"
+              ]
+            },
+            {
+              "type": "string"
+            }
+          ]
         },
         "duration": {
           "type": "string"
@@ -2169,7 +2269,7 @@
     },
     "Provider.CacheTTL": {
       "type": "string",
-      "pattern": "^[+-]?\\d*\\.?\\d+(?:[Ee][+-]?\\d+)?(?:ms|s|m|h|d)$"
+      "pattern": "^[+-]?(?:\\d+(?:\\.\\d+)?|\\.\\d+)(?:[Ee][+-]?\\d+)?(?:ms|s|m|h|d)$"
     },
     "Provider.Cache": {
       "type": "object",
@@ -2384,10 +2484,14 @@
               "type": "object",
               "properties": {
                 "min": {
-                  "type": "integer"
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991
                 },
                 "max": {
-                  "type": "integer"
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991
                 }
               },
               "additionalProperties": false
@@ -2467,7 +2571,9 @@
               ]
             },
             "size": {
-              "type": "integer"
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
             }
           },
           "required": [
@@ -2589,13 +2695,19 @@
           "type": "object",
           "properties": {
             "context": {
-              "type": "integer"
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
             },
             "input": {
-              "type": "integer"
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
             },
             "output": {
-              "type": "integer"
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
             }
           },
           "additionalProperties": false

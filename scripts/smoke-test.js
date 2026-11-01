@@ -23,7 +23,11 @@ async function main() {
   process.env.XDG_CONFIG_HOME = path.join(dir, 'xdg');
   const zfile = path.join(dir, 'zcode', 'provider_config.json');
   const pfile = path.join(dir, 'pi', 'models.json');
-  const { server, token } = createServer({ configPath: file, zcodePath: zfile, piPath: pfile, libraryPath: path.join(dir, 'lib', 'providers.json'), cwd: dir });
+  const tfile = path.join(dir, 't3', 'settings.json');
+  fs.mkdirSync(path.dirname(tfile));
+  const t3Stock = { favorites: [{ provider: 'cursor', model: 'x' }], providerInstances: { codex: { driver: 'codex', enabled: false, config: { binaryPath: 'codex', customModels: [] } } } };
+  fs.writeFileSync(tfile, JSON.stringify(t3Stock));
+  const { server, token } = createServer({ configPath: file, zcodePath: zfile, piPath: pfile, t3Path: tfile, libraryPath: path.join(dir, 'lib', 'providers.json'), cwd: dir });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const base = `http://localhost:${server.address().port}`;
   const call = async (method, p, body) => {
@@ -110,6 +114,43 @@ async function main() {
     const again = await call('POST', '/api/shared/copy', { key: orp.key, to: 'pi' });
     assert.strictEqual(again.json.result.added, 0, 'copying twice adds nothing');
     assert.strictEqual((await call('POST', '/api/pi/save', { doc: { providers: { x: { baseUrl: 'http://y', models: [{ id: 'a' }] } } } })).status, 400, 'invalid Pi config is refused');
+    // T3 Code: only Anthropic-style endpoints fit, through a claudeAgent instance.
+    assert.strictEqual((await call('POST', '/api/shared/copy', { key: orp.key, to: 't3' })).status, 400, 'OpenAI-style endpoints are refused for T3 Code');
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(tfile, 'utf8')), t3Stock, 'refused copy leaves the file alone');
+    process.env.SY_TEST_KEY = 'sk-test';
+    const ant = await call('POST', '/api/shared/library/save', { provider: { name: '302 Gateway', baseURL: 'https://gw.example.com/v1/', api: 'anthropic', apiKey: '{env:SY_TEST_KEY}', models: [{ id: 'glm-5', name: 'GLM 5' }, { id: 'kimi' }] } });
+    const antKey = ant.json.providers.find((p) => p.in.library && p.api === 'anthropic').key;
+    assert.strictEqual(antKey, 'https://gw.example.com', '/v1 is not part of an Anthropic endpoint key');
+    const tc = await call('POST', '/api/shared/copy', { key: antKey, to: 't3' });
+    assert.strictEqual(tc.status, 200, JSON.stringify(tc.json));
+    assert.strictEqual(tc.json.result.id, 'provider-302-gateway', 'instance IDs start with a letter');
+    const tdoc = JSON.parse(fs.readFileSync(tfile, 'utf8'));
+    const ti = tdoc.providerInstances[tc.json.result.id];
+    const tenv = Object.fromEntries(ti.environment.map((v) => [v.name, v.value]));
+    assert.strictEqual(ti.driver, 'claudeAgent');
+    assert.strictEqual(tenv.ANTHROPIC_BASE_URL, 'https://gw.example.com', 'Claude Code adds /v1 itself');
+    assert.strictEqual(tenv.ANTHROPIC_AUTH_TOKEN, 'sk-test', 'env keys resolve to a literal');
+    assert.strictEqual(tenv.ANTHROPIC_API_KEY, '', 'a machine-wide key is masked');
+    assert.deepStrictEqual(ti.config.customModels, [{ slug: 'glm-5', name: 'GLM 5' }, 'kimi']);
+    assert.deepStrictEqual(tdoc.favorites, t3Stock.favorites, 'other settings survive');
+    assert.deepStrictEqual(tdoc.providerInstances.codex, t3Stock.providerInstances.codex, 'stock instances survive');
+    assert.ok(fs.existsSync(tfile + '.bak'), 'T3 Code backup created');
+    const tMerged = tc.json.providers.find((p) => p.key === antKey);
+    assert.ok(tMerged.in.t3 && tMerged.in.library, 'the T3 instance merges with the /v1 spelling of the endpoint');
+    assert.strictEqual((await call('POST', '/api/shared/copy', { key: antKey, to: 't3' })).json.result.added, 0, 'copying twice adds nothing');
+    const toOc = await call('POST', '/api/shared/copy', { key: antKey, to: 'opencode' });
+    assert.strictEqual(JSON.parse(fs.readFileSync(file, 'utf8')).provider[toOc.json.result.id].options.baseURL, 'https://gw.example.com/v1', '@ai-sdk/anthropic needs /v1');
+    // A key T3 already moved to its secret store is never replaced.
+    ti.environment.find((v) => v.name === 'ANTHROPIC_AUTH_TOKEN').value = '';
+    ti.environment.find((v) => v.name === 'ANTHROPIC_AUTH_TOKEN').valueRedacted = true;
+    fs.writeFileSync(tfile, JSON.stringify(tdoc));
+    await call('POST', '/api/shared/copy', { key: antKey, to: 't3' });
+    assert.strictEqual(JSON.parse(fs.readFileSync(tfile, 'utf8')).providerInstances[tc.json.result.id].environment.find((v) => v.name === 'ANTHROPIC_AUTH_TOKEN').value, '');
+    assert.strictEqual((await call('POST', '/api/t3/save', { doc: { providerInstances: { '1bad': { driver: 'claudeAgent' } } } })).status, 400, 'invalid T3 Code config is refused');
+    assert.strictEqual((await call('GET', '/api/t3')).json.path, tfile);
+    await call('POST', '/api/shared/library/remove', { key: antKey });
+    assert.ok(!(await call('GET', '/api/shared')).json.providers.find((p) => p.key === antKey).in.library, 'library entries with /v1 can be removed');
+
     // Library: save by hand, then it shows up and can be removed.
     const lib = await call('POST', '/api/shared/library/save', { provider: { name: 'Local', baseURL: 'http://localhost:11434/v1', models: [{ id: 'llama3' }] } });
     assert.ok(lib.json.providers.some((p) => p.in.library && p.models[0]?.id === 'llama3'));

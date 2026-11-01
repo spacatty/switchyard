@@ -9,17 +9,19 @@ const { discover, testModel, getSchema } = require('./discover');
 const { listFiles, readFile, writeFile, createFile, removeFile } = require('./files');
 const { zcodeConfigPath, readZcode, writeZcode, zcodeRunning, API_TYPES, RESERVED_IDS, REASONING_MAPS } = require('./zcode');
 const pi = require('./pi');
+const t3 = require('./t3');
 const shared = require('./shared');
 
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
 
-function createServer({ configPath, zcodePath, piPath, libraryPath, cwd = process.cwd() }) {
+function createServer({ configPath, zcodePath, piPath, t3Path, libraryPath, cwd = process.cwd() }) {
   const token = crypto.randomBytes(16).toString('hex');
   const state = {
     target: configPath ? path.resolve(configPath) : pickDefault(candidatePaths(cwd)),
     zcode: zcodePath ? path.resolve(zcodePath) : zcodeConfigPath(),
     pi: piPath ? path.resolve(piPath) : pi.piConfigPath(),
+    t3: t3Path ? path.resolve(t3Path) : t3.t3ConfigPath(),
     library: libraryPath ? path.resolve(libraryPath) : shared.libraryPath(),
   };
 
@@ -55,17 +57,20 @@ function createServer({ configPath, zcodePath, piPath, libraryPath, cwd = proces
     const oc = readConfig(state.target);
     const zc = readZcode(state.zcode);
     const pc = pi.readPi(state.pi);
+    const tc = t3.readT3(state.t3);
     const lib = shared.readLibrary(state.library);
     const harnesses = [
       { id: 'opencode', name: 'OpenCode', path: oc.path, exists: oc.exists, error: oc.error || null },
       { id: 'zcode', name: 'Z-Code', path: zc.path, exists: zc.exists, error: zc.error, running: await zcodeLive() },
       { id: 'pi', name: 'Pi', path: pc.path, exists: pc.exists, error: pc.error },
+      { id: 't3', name: 'T3 Code', path: tc.path, exists: tc.exists, error: tc.error },
     ];
     const providers = shared.buildShared({
       library: lib.doc?.providers || [],
       opencode: oc.config ? shared.fromOpenCode(oc.config) : [],
       zcode: zc.doc ? shared.fromZcode(zc.doc) : [],
       pi: pc.doc ? shared.fromPi(pc.doc) : [],
+      t3: tc.doc ? shared.fromT3(tc.doc) : [],
     });
     return { providers, harnesses, library: { path: lib.path, error: lib.error || null } };
   };
@@ -96,6 +101,12 @@ function createServer({ configPath, zcodePath, piPath, libraryPath, cwd = proces
       if (pc.hasComments && !force) throw needsConfirm('models.json contains comments. Writing to it removes them (a .bak backup is kept). Continue?');
       doc = pc.doc;
       write = () => pi.writePi(state.pi, doc);
+    } else if (to === 't3') {
+      const tc = t3.readT3(state.t3);
+      if (!tc.doc) throw new Error(`Could not parse ${tc.path}: ${tc.error}`);
+      if (tc.hasComments && !force) throw needsConfirm('settings.json contains comments. Writing to it removes them (a .bak backup is kept). Continue?');
+      doc = tc.doc;
+      write = () => t3.writeT3(state.t3, doc);
     } else throw new Error('Unknown harness');
     const result = shared.applyTo(to, doc, entry, Array.isArray(models) ? models : null);
     const r = write();
@@ -106,9 +117,9 @@ function createServer({ configPath, zcodePath, piPath, libraryPath, cwd = proces
     if (!provider?.baseURL || !/^https?:\/\//i.test(provider.baseURL)) throw new Error('A provider needs a base URL starting with http:// or https://');
     const lib = shared.readLibrary(state.library);
     if (!lib.doc) throw new Error(`Could not parse ${lib.path}: ${lib.error}`);
-    const key = shared.urlKey(provider.baseURL);
+    const key = shared.providerKey(provider);
     const old = replaceKey || key;
-    const list = lib.doc.providers.filter((p) => shared.urlKey(p.baseURL) !== old && shared.urlKey(p.baseURL) !== key);
+    const list = lib.doc.providers.filter((p) => shared.providerKey(p) !== old && shared.providerKey(p) !== key);
     list.push({ id: provider.id || key, name: provider.name || provider.id || key, baseURL: provider.baseURL, api: provider.api || 'openai-chat', apiKey: provider.apiKey || undefined, headers: provider.headers || undefined, models: Array.isArray(provider.models) ? provider.models : [] });
     lib.doc.providers = list;
     shared.writeLibrary(state.library, lib.doc);
@@ -147,7 +158,7 @@ function createServer({ configPath, zcodePath, piPath, libraryPath, cwd = proces
     'POST /api/shared/library/remove': async (body) => {
       const lib = shared.readLibrary(state.library);
       if (!lib.doc) throw new Error(`Could not parse ${lib.path}: ${lib.error}`);
-      lib.doc.providers = lib.doc.providers.filter((p) => shared.urlKey(p.baseURL) !== body.key);
+      lib.doc.providers = lib.doc.providers.filter((p) => shared.providerKey(p) !== body.key);
       shared.writeLibrary(state.library, lib.doc);
       return sharedResponse();
     },
@@ -155,6 +166,11 @@ function createServer({ configPath, zcodePath, piPath, libraryPath, cwd = proces
     'POST /api/pi/save': async (body) => {
       const r = pi.writePi(state.pi, body.doc);
       return { ...pi.readPi(state.pi), apiTypes: pi.API_TYPES, reserved: pi.BUILTIN_IDS, backup: r.backup };
+    },
+    'GET /api/t3': async () => ({ ...t3.readT3(state.t3), reserved: t3.RESERVED_IDS }),
+    'POST /api/t3/save': async (body) => {
+      const r = t3.writeT3(state.t3, body.doc);
+      return { ...t3.readT3(state.t3), reserved: t3.RESERVED_IDS, backup: r.backup };
     },
     'GET /api/zcode': async () => ({ ...readZcode(state.zcode), running: await zcodeLive(), apiTypes: API_TYPES, reserved: RESERVED_IDS, reasoningMaps: REASONING_MAPS }),
     'POST /api/zcode/save': async (body) => {
